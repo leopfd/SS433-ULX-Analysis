@@ -40,7 +40,6 @@ def run_pipeline():
     
     event_files = sorted(glob.glob('*/repro/*splinecorr.fits'))[:]
     
-    # use paths from config
     pdf_out_filename = config.FIT_PLOT_PDF
     multi_pdf_out_filename = config.MULTI_FIT_PDF
     
@@ -77,7 +76,7 @@ def run_pipeline():
                          )
 
     num_processes = os.cpu_count()
-    print(f"--- starting parallel processing on {num_processes} cores ---")
+    print(f"starting parallel processing on {num_processes} cores...\n")
     start_total_time = time.time()
     
     with tqdm(total=total_steps, desc="processing observations", bar_format="{l_bar}{r_bar}") as pbar:
@@ -104,7 +103,6 @@ def run_pipeline():
              multi_fit_summary, multi_results_text, 
              pdf_out_files_worker, multi_pdf_out_files_worker) = res
             
-            # Write EVERYTHING to the Full Log
             results_file.write(header_text)
             results_file.write("\nCENTROID FIT SUMMARY:\n\n")
             results_file.write(centroid_fit_summary)
@@ -113,13 +111,12 @@ def run_pipeline():
             results_file.write("MULTI-COMPONENT FIT SUMMARY:\n\n")
             results_file.write(multi_fit_summary)
             
-            # Write ONLY multi-component data to the Multi Log (for the tracker)
             multi_results_file.write(multi_results_text)
             
             all_pdf_out_files.extend(pdf_out_files_worker)
             all_multi_pdf_out_files.extend(multi_pdf_out_files_worker)
 
-    print(f"Text logs written to:\n  {results_filename}\n  {multi_results_filename}")
+    print(f"Text logs written to:\n  {config.get_rel_path(results_filename)}\n  {config.get_rel_path(multi_results_filename)}")
     print('\ncompiling pdfs...\n')
 
     total_plots_to_compile = len(all_pdf_out_files) + len(all_multi_pdf_out_files)

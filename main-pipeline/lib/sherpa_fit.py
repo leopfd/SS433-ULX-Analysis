@@ -3,7 +3,6 @@ import time
 import logging
 import numpy as np
 
-# FIX: Force headless backend to prevent macOS Dock spam and crashes
 import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
@@ -16,10 +15,8 @@ import emcee
 from emcee.backends import HDFBackend
 import corner
 
-# local imports
 from lib.image_utils import data_extract_quickpos_iter, write_pixelscale, compute_split_rhat
 
-# sherpa imports must be available in the worker environment
 from sherpa.astro.ui import (
     load_data, image_close, image_data, load_psf, set_psf, image_psf,
     gauss2d, const2d, set_source, freeze, link, show_model, set_stat,
@@ -254,7 +251,6 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
         
         backend = HDFBackend(chain_filename, compression="gzip", compression_opts=4)
 
-        # --- Updated Chain Loading & Notification Logic ---
         current_steps = 0
         try:
             current_steps = backend.iteration
@@ -275,12 +271,10 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
         elif recalc and current_steps > 0:
             print(f"[{observation}] Recalc requested. Overwriting existing chain at {chain_filename}")
             backend.reset(current_n_walkers, ndim)
-            # Will trigger p0 generation below
         
         else:
             print(f"[{observation}] No valid chain found. Starting fresh at {chain_filename}")
             backend.reset(current_n_walkers, ndim)
-            # Will trigger p0 generation below
 
         # Generate initial position if starting fresh or resetting
         if run_sampler and backend.iteration == 0:
@@ -540,7 +534,6 @@ def process_observation(infile, progress_queue, obsid_coords, mcmc_scale_factors
                         n_components_multi, run_mcmc_multi, mcmc_iter_multi,
                         mcmc_n_walkers, mcmc_ball_size, sigma_val, progress_chunks=50, recalc=False,
                         chain_base_dir=None):
-    # main worker function called by multiprocessing pool
     
     pdf_out_files = []
     multi_pdf_out_files = []

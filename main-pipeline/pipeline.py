@@ -3,7 +3,6 @@ import sys
 import os
 import config
 
-# import stage modules
 import fit_images
 import track_components
 import model_kinematics
@@ -16,11 +15,11 @@ def run():
     start_time = time.time()
 
     # stage 1: fit images
-    print("\n=== stage 1: fitting images ===")
+    print("\n=== stage 1: fitting images ===\n")
     fit_images.run_pipeline()
     
     # stage 2: track components
-    print("\n=== stage 2: tracking components ===")
+    print("\n=== stage 2: tracking components ===\n")
     # capture the dataframe returned by the tracker
     tracker_df = track_components.run_tracker_analysis()
 
@@ -29,7 +28,7 @@ def run():
         sys.exit(1)
 
     # stage 3: kinematic fitting
-    print("\n=== stage 3: kinematic fitting ===")
+    print("\n=== stage 3: kinematic fitting ===\n")
     # pass tracker_df into the kinematic fitter
     ejection_df = model_kinematics.run_kinematic_analysis(tracker_df)
     
@@ -38,7 +37,7 @@ def run():
         sys.exit(1)
 
     # stage 4: swift comparison
-    print("\n=== stage 4: swift comparison ===")
+    print("\n=== stage 4: swift comparison ===\n")
     lib.swift_compare.plot_swift_comparison(tracker_df, ejection_df)
 
     end_time = time.time()

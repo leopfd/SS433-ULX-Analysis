@@ -6,7 +6,7 @@ from ciao_contrib.runtool import dmhedit
 from coords.format import ra2deg, dec2deg
 
 def quickpos(x, y, x0, y0, iterations=1, size_list=None, binsize_list=None, doplot=False):
-    # iteratively refines the centroid position using 1d histogram fitting
+    #iteratively refines the centroid position using 1d histogram fitting
     if size_list is None:
         size_list = [np.max(x) - np.min(x)] * iterations
     if binsize_list is None:

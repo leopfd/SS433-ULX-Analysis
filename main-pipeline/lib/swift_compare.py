@@ -10,13 +10,13 @@ def plot_swift_comparison(tracker_df, ejection_df):
     Call this AFTER running your kinematic fitting stage (Stage 3).
     """
     
-    print("\n[Swift Plot] Generating Comparison Plot...")
+    print("[Swift Plot] Generating Comparison Plot...")
     
     if not os.path.exists(config.SWIFT_FILE):
-        print(f"Error: Swift data file not found at {config.SWIFT_FILE}")
+        print(f"Error: Swift data file not found at {config.get_rel_path(config.SWIFT_FILE)}")
         return
 
-    # 1. Prepare Ejection Data 
+    # Prepare Ejection Data 
     if 'ejection_mjd' not in ejection_df.columns:
         if 'travel_time_days' in ejection_df.columns:
             ejection_df['ejection_mjd'] = ejection_df['mjd'] - ejection_df['travel_time_days']
@@ -29,10 +29,10 @@ def plot_swift_comparison(tracker_df, ejection_df):
         safe_beta = np.where(ejection_df['beta'] != 0, ejection_df['beta'], np.nan)
         ejection_df['ejection_mjd_err_pos'] = (ejection_df['travel_time_days'] * ejection_df['beta_err_pos']) / safe_beta
         ejection_df['ejection_mjd_err_neg'] = (ejection_df['travel_time_days'] * ejection_df['beta_err_neg']) / safe_beta
-        ejection_df['ejection_mjd_err_pos'].fillna(0, inplace=True)
-        ejection_df['ejection_mjd_err_neg'].fillna(0, inplace=True)
+        ejection_df['ejection_mjd_err_pos'] = ejection_df['ejection_mjd_err_pos'].fillna(0)
+        ejection_df['ejection_mjd_err_neg'] = ejection_df['ejection_mjd_err_neg'].fillna(0)
 
-    # 2. Merge Dataframes
+    # Merge Dataframes
     hrc_cols = ['obs_id', 'component', 'nominal', 'minus_err', 'plus_err']
     hrc_data = tracker_df[[c for c in hrc_cols if c in tracker_df.columns]].copy()
     
@@ -108,10 +108,10 @@ def plot_swift_comparison(tracker_df, ejection_df):
         if is_suspect and method != 'fit': lbl = "_nolegend_"
 
         ax.errorbar(
-            x=subset['ejection_mjd'], 
-            y=subset['nominal'] * config.HRC_SCALE_FACTOR,
-            xerr=[np.abs(subset['ejection_mjd_err_neg']), np.abs(subset['ejection_mjd_err_pos'])],
-            yerr=[subset['minus_err'] * config.HRC_SCALE_FACTOR, subset['plus_err'] * config.HRC_SCALE_FACTOR],
+            x=subset['ejection_mjd'].values, 
+            y=(subset['nominal'] * config.HRC_SCALE_FACTOR).values,
+            xerr=[np.abs(subset['ejection_mjd_err_neg'].values), np.abs(subset['ejection_mjd_err_pos'].values)],
+            yerr=[(subset['minus_err'] * config.HRC_SCALE_FACTOR).values, (subset['plus_err'] * config.HRC_SCALE_FACTOR).values],
             fmt=marker, linestyle='', markerfacecolor=face, markeredgecolor='black', 
             color=color, ecolor=color, capsize=3, alpha=0.9, zorder=10, label=lbl
         )
@@ -136,5 +136,5 @@ def plot_swift_comparison(tracker_df, ejection_df):
     out_file = os.path.join(config.DIR_JET_PLOTS, f'swift-comparison-{config.FILE_ID}.pdf')
     plt.tight_layout()
     plt.savefig(out_file)
-    print(f"Swift comparison plot saved to: {out_file}")
+    print(f"———>Swift comparison plot saved to: {config.get_rel_path(out_file)}")
     plt.close(fig)

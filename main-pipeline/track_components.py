@@ -12,35 +12,26 @@ from lib.arguments import get_pipeline_args
 def run_tracker_analysis():
     df = None
     
-    # Step 1: Load Data (Manual Override vs Auto-Track)
     if os.path.exists(config.TRACKER_TABLE_CSV):
-        print(f"Found existing tracker table: {config.TRACKER_TABLE_CSV}")
-        print("Loading from disk to preserve manual edits (Skipping Log Parsing).")
+        print(f"Loading existing tracker table: {config.get_rel_path(config.TRACKER_TABLE_CSV)}")
         try:
             df = pd.read_csv(config.TRACKER_TABLE_CSV)
         except Exception as e:
             print(f"[ERROR] Failed to read CSV: {e}")
-            # Fallback could go here, but usually safer to crash if manual file is corrupt
             raise
             
     else:
         print("No existing tracker table found. Running Auto-Tracker...")
-        print(f"Loading and processing logs: {config.MULTI_LOG_TXT}")
+        print(f"———>Loading and processing logs: {config.get_rel_path(config.MULTI_LOG_TXT)}")
         df = load_sherpa_log_to_dataframe(config.MULTI_LOG_TXT)
 
         if df.empty:
             raise ValueError("Dataframe is empty. Check if the log file exists and has correct format.")
 
-        # Save the RAW positions immediately so user can edit later
         df.to_csv(config.TRACKER_TABLE_CSV, index=False)
-        print(f"Tracker table (raw) saved to: {config.TRACKER_TABLE_CSV}")
+        print(f"Tracker table saved to: {config.TRACKER_TABLE_CSV}")
 
-    # Step 2: Process Geometry (Runs on BOTH manual and auto data)
-    # This ensures that if you manually changed xpos/ypos in the CSV, 
-    # the Radius and PA are re-calculated correctly here.
 
-    # 1. Recenter on core
-    # We filter for the core component defined in config
     ref_df = df[df['component'] == config.G1_COMPONENT][['obs_id', 'xpos', 'ypos']]
     ref_df = ref_df.rename(columns={'xpos': 'ref_x', 'ypos': 'ref_y'})
 
@@ -60,16 +51,16 @@ def run_tracker_analysis():
     # Drop temp columns
     df.drop(columns=['dx', 'dy', 'ref_x', 'ref_y'], inplace=True)
 
-    # 2. Calculate Offsets
+    # Calculate Offsets
     df['xoff'] = df['xpos'] - config.CENTER_PIXEL
     df['yoff'] = df['ypos'] - config.CENTER_PIXEL
 
-    # 3. Calculate PA and Radius
+    # Calculate PA and Radius
     pa_rad = np.arctan2(-df['xoff'], df['yoff'])
     df['PA'] = np.degrees(pa_rad)
     df['pa_rad'] = pa_rad 
 
-    # 4. Propagate Errors (PA)
+    # Propagate Errors (PA)
     d2 = df['xoff']**2 + df['yoff']**2
     # Avoid divide by zero warnings
     dpa_dx = np.divide(-df['yoff'], d2, out=np.full_like(d2, np.nan), where=d2 != 0)
@@ -78,7 +69,7 @@ def run_tracker_analysis():
     df['PA_err_plus'] = np.degrees(np.sqrt((dpa_dx * df['xpos_plus'])**2 + (dpa_dy * df['ypos_plus'])**2))
     df['PA_err_minus'] = np.degrees(np.sqrt((dpa_dx * df['xpos_minus'])**2 + (dpa_dy * df['ypos_minus'])**2))
     
-    # 5. Propagate Errors (Radius)
+    # Propagate Errors (Radius)
     pixscale_arcsec = 0.13175 * config.BIN_SIZE 
     df['radius'] = np.hypot(df['xoff'], df['yoff']) * pixscale_arcsec
 
@@ -150,7 +141,7 @@ def run_tracker_analysis():
         for comp, color in comp_discrete_map.items():
             if comp in grouped_by_comp.groups:
                 grp = grouped_by_comp.get_group(comp)
-                ax_pa.errorbar(grp['mjd'], grp['PA'], yerr=[grp['PA_err_minus'], grp['PA_err_plus']], marker='.', linestyle='-', capsize=3, color=color, label=comp)
+                ax_pa.errorbar(grp['mjd'].values, grp['PA'].values, yerr=[grp['PA_err_minus'].values, grp['PA_err_plus'].values], marker='.', linestyle='-', capsize=3, color=color, label=comp)
                 
         ax_pa.set_ylabel('position angle (°)')
         ax_pa.set_xlabel('mjd')
@@ -176,7 +167,11 @@ def run_tracker_analysis():
                 y_val = df_nom[comp_name]
                 y_err_val = [df_minus[comp_name], df_plus[comp_name]]
                 alpha_val, line_style, label_text, z_order = (1.0, '-', comp_name, 10) if comp_name == focus else (0.3, '', None, 1)
-                ax.errorbar(x_val, y_val, yerr=y_err_val, color=current_color, marker='.', linestyle=line_style, capsize=3, alpha=alpha_val, label=label_text, zorder=z_order)
+                x_arr = x_val.values
+                y_arr = y_val.values
+                y_err_arr = [df_minus[comp_name].values, df_plus[comp_name].values]
+
+                ax.errorbar(x_arr, y_arr, yerr=y_err_arr, color=current_color, marker='.', linestyle=line_style, capsize=3, alpha=alpha_val, label=label_text, zorder=z_order)
 
             ax.set_yticks([0.1,0.3])
             if ax.has_data(): ax.legend(loc='upper left')
@@ -203,7 +198,14 @@ def run_tracker_analysis():
                     normalized_t = time_norm(row['mjd'])
                     color_idx = 0.4 + 0.6 * normalized_t
                     t_color = cmap(color_idx)
-                    ax_polar.errorbar(row['pa_rad'], row['radius'], xerr=[[np.deg2rad(row['PA_err_minus'])], [np.deg2rad(row['PA_err_plus'])]], yerr=[[row['radius_minus_err']], [row['radius_plus_err']]], marker='.', linestyle='', color=t_color, capsize=2, markersize=8)
+                    p_rad = float(row['pa_rad'])
+                    rad   = float(row['radius'])
+                    pa_min = float(np.deg2rad(row['PA_err_minus']))
+                    pa_pl  = float(np.deg2rad(row['PA_err_plus']))
+                    r_min  = float(row['radius_minus_err'])
+                    r_pl   = float(row['radius_plus_err'])
+
+                    ax_polar.errorbar(p_rad, rad, xerr=[[pa_min], [pa_pl]], yerr=[[r_min], [r_pl]], marker='.', linestyle='', color=t_color, capsize=2, markersize=8)
 
         sm = plt.cm.ScalarMappable(cmap=plt.cm.Greys, norm=time_norm)
         sm.set_array([])
@@ -227,7 +229,7 @@ def run_tracker_analysis():
         pdf.savefig(fig_polar)
         plt.close(fig_polar)
     
-    print(f"plots saved to: {pdf_filename}")
+    print(f"\nplots saved to: {config.get_rel_path(pdf_filename)}")
     
     # Return processed dataframe
     return df

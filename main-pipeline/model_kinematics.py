@@ -6,26 +6,21 @@ from lib.physics import fit_and_calculate_jets, _get_closest_geometric_point
 from lib.plotting import plot_fit_and_calc_results
 from lib.arguments import get_pipeline_args
 
-# Import the tracker so we can get data in standalone mode
 import track_components
 
 def run_kinematic_analysis(input_df):
     ss433_params = config.EPHEMERIS
     
-    # use dynamic plot output path
     pdf_output_path = config.PLOT_OUTPUT_PDF
     
     pdf_pages = PdfPages(pdf_output_path)
     all_results_data = []
 
-    # Use the dataframe passed from the tracker (Pipeline or Standalone)
     df = input_df.copy()
-    print(f"loaded {len(df)} rows from tracker dataframe")
 
     is_first_iteration = True
     
     for obs_id, group in df.groupby('obs_id'):
-        print(f"\nprocessing observation id: {obs_id}")
         blue_data = group[group['component'] == 'east']
         if group.empty or blue_data.empty: continue
         red_data = group[group['component'] == 'west']
@@ -46,7 +41,6 @@ def run_kinematic_analysis(input_df):
 
             if analysis_results['success']:
                 plot_fit_and_calc_results(obs_id, blob_pair_data, analysis_results, ss433_params, pdf_object=pdf_pages)
-                print(f"--> successfully processed and saved plot for {obs_id}.")
                 
                 for jet_color in ['blue', 'red']:
                     jet_info = analysis_results['jets'][jet_color]
@@ -86,15 +80,12 @@ def run_kinematic_analysis(input_df):
     pdf_pages.close()
     print(f"\nall plots saved to '{pdf_output_path}'")
     
-    # Return the results so the pipeline can pass them to stage 4
     return pd.DataFrame(all_results_data)
 
 if __name__ == "__main__":
     args = get_pipeline_args()
     config.update_config_from_args(args)
-    
-    # Standalone mode: Call the tracker first to get the dataframe
-    # This uses the same logic as the pipeline (checks disk CSV vs logs)
+
     print("Running standalone: fetching data from tracker...")
     tracker_df = track_components.run_tracker_analysis()
     

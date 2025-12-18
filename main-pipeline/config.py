@@ -33,11 +33,11 @@ FULL_LOG_TXT = ""
 MULTI_LOG_TXT = ""      
 FIT_PLOT_PDF = ""       
 MULTI_FIT_PDF = ""      
-TRACKER_TABLE_CSV = ""  # Keeping this one as requested
+TRACKER_TABLE_CSV = ""
 PLOT_OUTPUT_PDF = ""
 
 # Swift / External Data
-SWIFT_FILE = "/Users/leodrake/Documents/MIT/ss433/swift-hrc-data.txt"
+SWIFT_FILE = "/Users/leodrake/Documents/ss433/swift-hrc-data.txt"
 HRC_SCALE_FACTOR = 10.0
 
 # constants
@@ -168,5 +168,12 @@ def update_config_from_args(args=None):
         print(f"  MCMC: {RUN_MCMC} (Steps: {MCMC_ITER})")
         print(f"  ID String: {FILE_ID}")
         print(f"\n")
+
+def get_rel_path(path):
+    """Returns the path relative to BASE_DIR for cleaner printing."""
+    try:
+        return os.path.relpath(path, BASE_DIR)
+    except ValueError:
+        return path
 
 update_config_from_args(None)

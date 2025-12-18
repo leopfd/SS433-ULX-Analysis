@@ -4,7 +4,6 @@ import numpy as np
 from collections import defaultdict
 
 def load_sherpa_log_to_dataframe(filename):
-    # FIX: Added re.IGNORECASE to handle 'observation:' vs 'Observation:'
     obs_id_re = re.compile(r"Observation:\s*(\d+)", re.IGNORECASE)
     date_re = re.compile(r"Date:\s*([\d\.]+).*?Exptime:\s*([\d\.]+)", re.IGNORECASE)
     
@@ -24,7 +23,6 @@ def load_sherpa_log_to_dataframe(filename):
         print(f"error: file not found at {filename}")
         return pd.DataFrame()
 
-    # FIX: Added (?i) flag to make the split case-insensitive
     obs_blocks = re.split(r'(?i)(?=Observation:)', raw_text)
     rows = []
     
@@ -76,7 +74,7 @@ def load_sherpa_log_to_dataframe(filename):
 
         def get_val(cid, p): return comps[cid].get(p, (0,0,0))[0]
 
-        # Logic to identify components (Core vs Jets)
+        # Logic to identify components
         # Assumes the component with max Amplitude is the Core
         core_id = max(g_ids, key=lambda c: get_val(c, 'ampl'))
         core_x = get_val(core_id, 'xpos')
