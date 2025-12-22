@@ -24,7 +24,7 @@ def compile_pngs_to_pdf(pbar, png_files, pdf_filename):
         else:
             print(f"warning: missing file {png_file}, skipping.")
         pbar.update(1) 
-    img1.save(pdf_filename, "PDF", resolution=100.0, save_all=True, append_images=images)
+    img1.save(pdf_filename, "PDF", resolution=400.0, save_all=True, append_images=images)
 
 def run_pipeline():
     Image.MAX_IMAGE_PIXELS = None
@@ -39,6 +39,22 @@ def run_pipeline():
     os.chdir(config.BASE_DIR)
     
     event_files = sorted(glob.glob('*/repro/*splinecorr.fits'))[:]
+    
+    if config.OBS_SELECTION:
+        allowed_obs = set()
+        for part in config.OBS_SELECTION.split(','):
+            if '-' in part:
+                start, end = part.split('-')
+                allowed_obs.update(str(i) for i in range(int(start), int(end) + 1))
+            else:
+                allowed_obs.add(part.strip())
+        
+        # Filter the file list so only requested observations are processed
+        event_files = [f for f in event_files if f.split(os.sep)[0] in allowed_obs]
+        
+        if not event_files:
+            print(f"warning: no files matched observation selection: {config.OBS_SELECTION}")
+            return
     
     pdf_out_filename = config.FIT_PLOT_PDF
     multi_pdf_out_filename = config.MULTI_FIT_PDF
@@ -72,7 +88,8 @@ def run_pipeline():
                           sigma_val=config.SIGMA_VAL,
                           progress_chunks=target_update_count,
                           recalc=recalculate_chains,
-                          chain_base_dir=config.DIR_CHAINS
+                          chain_base_dir=config.DIR_CHAINS,
+                          signifiers=config.SIGNIFIERS
                          )
 
     num_processes = os.cpu_count()
@@ -89,6 +106,8 @@ def run_pipeline():
             while not progress_queue.empty():
                 pbar.update(progress_queue.get())
             results = async_result.get()
+
+    print()
     
     end_total_time = time.time()
     print(f"\n--- parallel processing complete in {(end_total_time - start_total_time) / 60.0:.2f} minutes ---\n")

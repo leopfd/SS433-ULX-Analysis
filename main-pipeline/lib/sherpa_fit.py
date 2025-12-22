@@ -121,7 +121,7 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                        freeze_components=None, use_mcmc=True, mcmc_iter=5000, mcmc_burn_in_frac=0.2,
                        n_walkers=32, ball_size=1e-4, sigma_val=1, 
                        prefix="g", confirm=True, imgfit=False, progress_chunks=50, progress_queue=None,
-                       chain_base_dir=None, recalc=False, bin_size=None):
+                       chain_base_dir=None, recalc=False, bin_size=None, signifiers=None):
     
     # helper to expand single value inputs
     def process_numeric_param(param, name):
@@ -233,14 +233,28 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
         current_n_walkers = n_walkers if n_walkers >= 2 * ndim else 2 * ndim + 2
         
         ball_str = str(ball_size).replace('.', 'p')
-        param_folder_name = (f"mcmc-chain-{n_components}comp-"
-                             f"{current_n_walkers}walkers-"
-                             f"{mcmc_iter}steps-"
-                             f"{ball_str}ball")
+        base_name = (f"mcmc-chain-{n_components}comp-"
+                     f"{current_n_walkers}walkers-"
+                     f"{mcmc_iter}steps-"
+                     f"{ball_str}ball")
         
+        folder_parts = [base_name]
+
+        if signifiers:
+            step_str_simple = str(mcmc_iter)
+            step_str_k = f"{int(mcmc_iter/1000)}k" if mcmc_iter >= 1000 and mcmc_iter % 1000 == 0 else ""
+            
+            for s in signifiers:
+                if s == 'mcmc': continue
+                if s == step_str_simple: continue
+                if s == step_str_k: continue
+                folder_parts.append(s)
+
         if bin_size is not None:
             bin_str = str(bin_size).replace('.', 'p')
-            param_folder_name += f"-bin{bin_str}"
+            folder_parts.append(f"bin{bin_str}")
+
+        param_folder_name = "-".join(folder_parts)
         
         if chain_base_dir is None:
             chain_base_dir = os.path.join(os.getcwd(), "2Dfits", "emcee_chains")
@@ -269,11 +283,9 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                 p0 = None # Resumes automatically
         
         elif recalc and current_steps > 0:
-            print(f"[{observation}] Recalc requested. Overwriting existing chain at {chain_filename}")
             backend.reset(current_n_walkers, ndim)
         
         else:
-            print(f"[{observation}] No valid chain found. Starting fresh at {chain_filename}")
             backend.reset(current_n_walkers, ndim)
 
         # Generate initial position if starting fresh or resetting
@@ -533,7 +545,7 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
 def process_observation(infile, progress_queue, obsid_coords, mcmc_scale_factors, emp_psf_file,
                         n_components_multi, run_mcmc_multi, mcmc_iter_multi,
                         mcmc_n_walkers, mcmc_ball_size, sigma_val, progress_chunks=50, recalc=False,
-                        chain_base_dir=None):
+                        chain_base_dir=None, signifiers=None):
     
     pdf_out_files = []
     multi_pdf_out_files = []
@@ -570,7 +582,7 @@ def process_observation(infile, progress_queue, obsid_coords, mcmc_scale_factors
         return (obsid, "", "", "", "", "", [], [])
 
     temp_cent_fit_png = f"2Dfits/temp_{obsid}_cent_fit.png"
-    centroid_fit_fig.savefig(temp_cent_fit_png)
+    centroid_fit_fig.savefig(temp_cent_fit_png, dpi=400)
     plt.close(centroid_fit_fig)
     pdf_out_files.append(temp_cent_fit_png)
 
@@ -604,7 +616,7 @@ def process_observation(infile, progress_queue, obsid_coords, mcmc_scale_factors
         return (obsid, header_text, centroid_fit_summary, "", "", "", pdf_out_files, [])
 
     temp_src_fit_png = f"2Dfits/temp_{obsid}_src_fit.png"
-    src_fit_fig.savefig(temp_src_fit_png)
+    src_fit_fig.savefig(temp_src_fit_png, dpi=400)
     plt.close(src_fit_fig)
     pdf_out_files.append(temp_src_fit_png)
 
@@ -646,7 +658,8 @@ def process_observation(infile, progress_queue, obsid_coords, mcmc_scale_factors
         progress_chunks=progress_chunks, progress_queue=progress_queue,
         chain_base_dir=chain_base_dir,
         recalc=recalc,
-        bin_size=multi_binsize
+        bin_size=multi_binsize,
+        signifiers=signifiers
     )
 
     if multi_fit_summary is None:
@@ -654,20 +667,20 @@ def process_observation(infile, progress_queue, obsid_coords, mcmc_scale_factors
         return (obsid, header_text, centroid_fit_summary, src_fit_summary, "", "", pdf_out_files, [])
 
     temp_multi_fit_png = f"2Dfits/temp_{obsid}_multi_fit.png"
-    multi_fit_fig.savefig(temp_multi_fit_png)
+    multi_fit_fig.savefig(temp_multi_fit_png, dpi=400)
     plt.close(multi_fit_fig)
     pdf_out_files.append(temp_multi_fit_png)
     multi_pdf_out_files.append(temp_multi_fit_png)
 
     if multi_walker_fig is not None:
         temp_walker_png = f"2Dfits/temp_{obsid}_walker_map.png"
-        multi_walker_fig.savefig(temp_walker_png)
+        multi_walker_fig.savefig(temp_walker_png, dpi=400)
         plt.close(multi_walker_fig)
         pdf_out_files.append(temp_walker_png)
 
     if multi_corner_fig is not None:
         temp_corner_png = f"2Dfits/temp_{obsid}_corner.png"
-        multi_corner_fig.savefig(temp_corner_png)
+        multi_corner_fig.savefig(temp_corner_png, dpi=400)
         plt.close(multi_corner_fig)
         pdf_out_files.append(temp_corner_png)
 

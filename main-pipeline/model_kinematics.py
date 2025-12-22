@@ -6,16 +6,19 @@ from lib.physics import fit_and_calculate_jets, _get_closest_geometric_point
 from lib.plotting import plot_fit_and_calc_results
 from lib.arguments import get_pipeline_args
 
+# Import the tracker so we can get data in standalone mode
 import track_components
 
 def run_kinematic_analysis(input_df):
     ss433_params = config.EPHEMERIS
     
+    # use dynamic plot output path
     pdf_output_path = config.PLOT_OUTPUT_PDF
     
     pdf_pages = PdfPages(pdf_output_path)
     all_results_data = []
 
+    # Use the dataframe passed from the tracker (Pipeline or Standalone)
     df = input_df.copy()
 
     is_first_iteration = True
@@ -78,8 +81,9 @@ def run_kinematic_analysis(input_df):
             print(f"--> skipping {obs_id}: did not find a valid blue/red jet pair.")
 
     pdf_pages.close()
-    print(f"\nall plots saved to '{pdf_output_path}'")
+    print(f"\nall plots saved to '{config.get_rel_path(pdf_output_path)}'")
     
+    # Return the results so the pipeline can pass them to stage 4
     return pd.DataFrame(all_results_data)
 
 if __name__ == "__main__":

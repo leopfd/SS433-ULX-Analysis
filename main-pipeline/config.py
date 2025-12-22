@@ -12,6 +12,7 @@ MCMC_ITER = 500
 MCMC_BALL = 1e-4
 SIGNIFIERS = ['mcmc'] 
 EPHEM_CHOICE = 'simple'
+OBS_SELECTION = None
 
 # output path placeholders
 FILE_ID = ""
@@ -104,6 +105,7 @@ def update_config_from_args(args=None):
     global TRACKER_TABLE_CSV, PLOT_OUTPUT_PDF
     global EMP_PSF_FILE, EPHEMERIS
     global SWIFT_FILE, HRC_SCALE_FACTOR
+    global OBS_SELECTION
 
     if args:
         if args.base_dir: BASE_DIR = args.base_dir
@@ -116,6 +118,7 @@ def update_config_from_args(args=None):
         MCMC_BALL = args.ball
         SIGNIFIERS = args.sigs.copy() 
         EPHEM_CHOICE = args.ephem
+        OBS_SELECTION = args.obs
 
     if MCMC_ITER > 9999:
         step_str = f"{int(MCMC_ITER/1000)}k"
@@ -129,6 +132,20 @@ def update_config_from_args(args=None):
         EPHEMERIS = EPHEM_FULL
     else:
         EPHEMERIS = EPHEM_SIMPLE
+
+    if OBS_SELECTION:
+        parts = OBS_SELECTION.split(',')
+        short_parts = []
+        for p in parts:
+            p = p.strip()
+            if '-' in p:
+                start, end = p.split('-')
+                short_parts.append(f"{start.strip()[-2:]}--{end.strip()[-2:]}")
+            else:
+                short_parts.append(p[-2:])
+        
+        # Add to signifiers list so it becomes part of the dash-separated ID
+        SIGNIFIERS.append("_".join(short_parts))
 
     FITS_DIR = os.path.join(BASE_DIR, '2Dfits')
     DIR_LOGS_FULL = os.path.join(FITS_DIR, 'fit results')
