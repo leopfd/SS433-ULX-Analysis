@@ -15,6 +15,9 @@ import emcee
 from emcee.backends import HDFBackend
 import corner
 
+from astropy.time import Time
+from lib.physics import ss433_phases
+
 from lib.image_utils import data_extract_quickpos_iter, write_pixelscale, compute_split_rhat
 
 from sherpa.astro.ui import (
@@ -121,7 +124,7 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                        freeze_components=None, use_mcmc=True, mcmc_iter=5000, mcmc_burn_in_frac=0.2,
                        n_walkers=32, ball_size=1e-4, sigma_val=1, 
                        prefix="g", confirm=True, imgfit=False, progress_chunks=50, progress_queue=None,
-                       chain_base_dir=None, recalc=False, bin_size=None, signifiers=None):
+                       chain_base_dir=None, recalc=False, bin_size=None, signifiers=None, ephemeris=None, date_obs=None):
     
     # helper to expand single value inputs
     def process_numeric_param(param, name):
@@ -421,6 +424,88 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                         fill_colors = [(*base_rgb, 0.1), (*base_rgb, 0.3), (*base_rgb, 0.5), (*base_rgb, 0.7), (*base_rgb, 0.9)]
                         ax.contourf(H, levels=levels, colors=fill_colors, extend='max', extent=plot_extent)
                         ax.contour(H, levels=levels, colors=[comp_color], linewidths=1.0, alpha=0.9, extent=plot_extent)
+
+                        if ephemeris is not None and date_obs is not None:
+                            try:
+                                #Identify the Core (Closest to Center)
+                                img_cy, img_cx = data_vals.shape
+                                center_x_pix = img_cx / 2.0 + 0.5
+                                center_y_pix = img_cy / 2.0 + 0.5
+                                
+                                min_dist = 1e9
+                                core_x, core_y = center_x_pix, center_y_pix
+                                
+                                for comp in gaussian_components:
+                                    # Use current best fit values
+                                    cx = comp.xpos.val
+                                    cy = comp.ypos.val
+                                    dist = np.hypot(cx - center_x_pix, cy - center_y_pix)
+                                    if dist < min_dist:
+                                        min_dist = dist
+                                        core_x, core_y = cx, cy
+
+                                # Calculate Jet Trajectory
+                                try:
+                                    # Try standard string format (YYYY-MM-DD)
+                                    t_obs = Time(date_obs, format='isot').mjd
+                                except (TypeError, ValueError):
+                                    # If that fails, assume it is already a float (MJD)
+                                    t_obs = Time(date_obs, format='mjd').mjd
+                                
+                                # Create a "lookback" time array
+                                days_back = np.linspace(0, 300, 100)
+                                jd_ej = (t_obs + 2400000.5) - days_back
+                                
+                                # Get RA/Dec offsets (in radians)
+                                mu_b_ra, mu_b_dec, mu_r_ra, mu_r_dec, _, _ = ss433_phases(jd_ej, ephemeris)
+                                
+                                # Convert to Pixels
+                                D_pc = 5500.0
+                                rad_to_arcsec = 206265.0
+                                hrc_pix_scale = 0.13175 * (bin_size if bin_size else 1.0)
+                                
+                                def rad_to_pix(ra_rad, dec_rad):
+                                    # V_jet ~ 0.26c. c in pc/day ~ 0.00084
+                                    c_pc_day = 0.0008394288
+                                    dist_traveled_pc = c_pc_day * days_back * D_pc
+                                    
+                                    # Angle = (V * t) / D
+                                    theta_rad_b = (c_pc_day * days_back) / D_pc
+                                    
+                                    # Simplified projection using standard approximation:
+                                    # r_arcsec = (beta * c * t / D) * 206265
+                                    beta = ephemeris['beta']
+                                    r_arcsec = (beta * c_pc_day * days_back / D_pc) * rad_to_arcsec
+                                    
+                                    x_off_arcsec = mu_b_ra * r_arcsec # check normalization
+                                    y_off_arcsec = mu_b_dec * r_arcsec
+                                    
+                                    # Convert to pixels
+                                    # In HRC/Sky: +RA is -X, +Dec is +Y
+                                    x_pix_off = -x_off_arcsec / hrc_pix_scale
+                                    y_pix_off = y_off_arcsec / hrc_pix_scale
+                                    
+                                    return x_pix_off, y_pix_off
+                                
+                                c_pc_day = (299792.458 * 86400) / (3.08567758 * 10**13)
+                                factor = (c_pc_day * days_back / D_pc) * rad_to_arcsec
+                                
+                                # Blue Jet
+                                x_off_b = -1 * (mu_b_ra * factor) / hrc_pix_scale
+                                y_off_b = (mu_b_dec * factor) / hrc_pix_scale
+                                
+                                # Red Jet
+                                x_off_r = -1 * (mu_r_ra * factor) / hrc_pix_scale
+                                y_off_r = (mu_r_dec * factor) / hrc_pix_scale
+
+                                # 4. Plot
+                                ax.plot(core_x + x_off_b, core_y + y_off_b, 'b--', linewidth=1.5, alpha=0.8, label='Model (Blue)')
+                                ax.plot(core_x + x_off_r, core_y + y_off_r, 'r--', linewidth=1.5, alpha=0.8, label='Model (Red)')
+                                ax.scatter([core_x], [core_y], marker='+', color='white', s=100, zorder=30, label='Core Center')
+
+                            except Exception as e:
+                                print(f"Warning: Could not overlay jet model: {e}")
+
                         bf_x = best_fit_values[x_idx]; bf_y = best_fit_values[y_idx]
                         ax.scatter(bf_x, bf_y, marker='o', color=dark_c, s=100, zorder=20, edgecolors='white', label=f"{comp_name} best fit")
                         if mcmc_results is not None:
@@ -545,7 +630,7 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
 def process_observation(infile, progress_queue, obsid_coords, mcmc_scale_factors, emp_psf_file,
                         n_components_multi, run_mcmc_multi, mcmc_iter_multi,
                         mcmc_n_walkers, mcmc_ball_size, sigma_val, progress_chunks=50, recalc=False,
-                        chain_base_dir=None, signifiers=None):
+                        chain_base_dir=None, signifiers=None, ephemeris=None):
     
     pdf_out_files = []
     multi_pdf_out_files = []
@@ -659,7 +744,9 @@ def process_observation(infile, progress_queue, obsid_coords, mcmc_scale_factors
         chain_base_dir=chain_base_dir,
         recalc=recalc,
         bin_size=multi_binsize,
-        signifiers=signifiers
+        signifiers=signifiers,
+        ephemeris=ephemeris,
+        date_obs=date
     )
 
     if multi_fit_summary is None:

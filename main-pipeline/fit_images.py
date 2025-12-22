@@ -89,7 +89,8 @@ def run_pipeline():
                           progress_chunks=target_update_count,
                           recalc=recalculate_chains,
                           chain_base_dir=config.DIR_CHAINS,
-                          signifiers=config.SIGNIFIERS
+                          signifiers=config.SIGNIFIERS,
+                          ephemeris=config.EPHEMERIS
                          )
 
     num_processes = os.cpu_count()
