@@ -85,6 +85,7 @@ def run_pipeline():
                           mcmc_iter_multi=mcmc_iterations,
                           mcmc_n_walkers=mcmc_n_walkers,  
                           mcmc_ball_size=mcmc_ball_size,
+                          auto_stop=config.AUTO_STOP,
                           sigma_val=config.SIGMA_VAL,
                           progress_chunks=target_update_count,
                           recalc=recalculate_chains,

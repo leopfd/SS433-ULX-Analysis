@@ -17,6 +17,7 @@ def get_pipeline_args():
     parser.add_argument("--recalc", action="store_true", help="force recalculation of mcmc chains")
     parser.add_argument("--steps", type=int, default=500, help="mcmc iterations (default: 500)")
     parser.add_argument("--ball", type=float, default=1e-4, help="mcmc ball size (default: 1e-4)")
+    parser.add_argument("--auto-stop", action="store_true", help="stop mcmc automatically when convergence is reached")
 
     # ephemeris and labels
     parser.add_argument("--ephem", type=str, default="simple", choices=["simple", "full"], help="ephemeris model: 'simple' or 'full' (default: simple)")

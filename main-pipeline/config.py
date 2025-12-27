@@ -98,7 +98,7 @@ EPHEM_FULL = {
 
 def update_config_from_args(args=None):
     global NUM_COMPS, SIGMA_VAL, BIN_SIZE, RUN_MCMC, RECALC_CHAINS
-    global MCMC_ITER, MCMC_BALL, SIGNIFIERS, EPHEM_CHOICE, BASE_DIR
+    global MCMC_ITER, MCMC_BALL, AUTO_STOP, SIGNIFIERS, EPHEM_CHOICE, BASE_DIR
     global FILE_ID, FITS_DIR, CENTER_PIXEL
     global DIR_LOGS_FULL, DIR_LOGS_MULTI, DIR_PLOTS_FULL, DIR_PLOTS_MULTI, DIR_CHAINS, DIR_TRACKER, DIR_DATA, DIR_TRACKER_PLOTS, DIR_JET_PLOTS
     global FULL_LOG_TXT, MULTI_LOG_TXT, FIT_PLOT_PDF, MULTI_FIT_PDF
@@ -116,6 +116,7 @@ def update_config_from_args(args=None):
         RECALC_CHAINS = args.recalc
         MCMC_ITER = args.steps
         MCMC_BALL = args.ball
+        AUTO_STOP = args.auto_stop
         SIGNIFIERS = args.sigs.copy() 
         EPHEM_CHOICE = args.ephem
         OBS_SELECTION = args.obs

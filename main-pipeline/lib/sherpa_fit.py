@@ -122,7 +122,7 @@ def src_psf_images(obsid, infile, x0, y0, diameter, wcs_ra, wcs_dec, binsize=0.2
 def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                        background=0, pos_min=(0, 0), pos_max=None, exptime=None, lock_fwhm=True,
                        freeze_components=None, use_mcmc=True, mcmc_iter=5000, mcmc_burn_in_frac=0.2,
-                       n_walkers=32, ball_size=1e-4, sigma_val=1, 
+                       n_walkers=32, ball_size=1e-4, auto_stop=False, sigma_val=1, 
                        prefix="g", confirm=True, imgfit=False, progress_chunks=50, progress_queue=None,
                        chain_base_dir=None, recalc=False, bin_size=None, signifiers=None, ephemeris=None, date_obs=None):
     
@@ -305,11 +305,33 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                 try:
                     current_step = backend.iteration
                     remaining_steps = mcmc_iter - current_step
+                    
                     if remaining_steps > 0:
                         update_interval = max(1, int(mcmc_iter / progress_chunks))
+                        check_interval = 500  # Check convergence every 500 steps
+                        
+                        # iterate step-by-step to allow interruption
                         for i, sample in enumerate(sampler.sample(p0, iterations=remaining_steps, progress=False)):
+                            
+                            # Update progress bar
                             if progress_queue and (i + 1) % update_interval == 0: 
                                 progress_queue.put(1)
+                            
+                            # auto stop logic
+                            if auto_stop and (sampler.iteration % check_interval == 0):
+                                try:
+                                    # tol=0 prevents crash on short chains
+                                    tau = sampler.get_autocorr_time(tol=0)
+                                    
+                                    if np.all(np.isfinite(tau)):
+                                        # Publication Grade Requirement: Chain > 100 * Tau
+                                        limit = 100 * np.max(tau)
+                                        
+                                        if sampler.iteration > limit:
+                                            print(f"[{observation}] Converged at step {sampler.iteration} (tau={np.max(tau):.1f}). Stopping early.")
+                                            break
+                                except Exception:
+                                    pass
                         
                 except Exception as e:
                     print(f"  error (obsid {observation}) sampler crashed: {e}")
@@ -629,7 +651,7 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
 
 def process_observation(infile, progress_queue, obsid_coords, mcmc_scale_factors, emp_psf_file,
                         n_components_multi, run_mcmc_multi, mcmc_iter_multi,
-                        mcmc_n_walkers, mcmc_ball_size, sigma_val, progress_chunks=50, recalc=False,
+                        mcmc_n_walkers, mcmc_ball_size, auto_stop=False, sigma_val=1, progress_chunks=50, recalc=False,
                         chain_base_dir=None, signifiers=None, ephemeris=None):
     
     pdf_out_files = []
