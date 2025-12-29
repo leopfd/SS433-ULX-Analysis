@@ -6,7 +6,7 @@ from ciao_contrib.runtool import dmhedit
 from coords.format import ra2deg, dec2deg
 
 def quickpos(x, y, x0, y0, iterations=1, size_list=None, binsize_list=None, doplot=False):
-    #iteratively refines the centroid position using 1d histogram fitting
+    # Iteratively refines the centroid position by fitting Gaussian profiles to 1D histograms of the data distribution
     if size_list is None:
         size_list = [np.max(x) - np.min(x)] * iterations
     if binsize_list is None:
@@ -68,7 +68,7 @@ def quickpos(x, y, x0, y0, iterations=1, size_list=None, binsize_list=None, dopl
     return best_x0, best_y0, cnt, fig_list
 
 def data_extract_quickpos_iter(infile, iters=3, sizes=[10, 5, 1.5], binsizes=[0.1, 0.1, 0.05]):
-    # extracts data from a fits file and runs quickpos to get an initial centroid
+    # Opens the FITS file to extract event data and uses the quickpos algorithm to estimate the initial centroid location
     with fits.open(infile) as obs:
         hdr = obs[1].header
         data = obs[1].data
@@ -98,7 +98,7 @@ def data_extract_quickpos_iter(infile, iters=3, sizes=[10, 5, 1.5], binsizes=[0.
     return date, exptime, pixel_x0_best, pixel_y0_best, cnt, qp_figs
 
 def write_pixelscale(file: str, nx: int, ny: int, ra: str, dec: str, hrc_pscale_arcsec: float = 0.13175):
-    # adds wcs header information using dmhedit
+    # Updates the FITS file header with World Coordinate System parameters to ensure correct pixel to sky mapping
     x_pix_ctr = (nx / 2.0) + 0.5
     y_pix_ctr = (ny / 2.0) + 0.5
     hrc_pscale_deg = hrc_pscale_arcsec / 3600.
@@ -123,7 +123,7 @@ def write_pixelscale(file: str, nx: int, ny: int, ra: str, dec: str, hrc_pscale_
         print(f"  error (obsid {obsid}): dmhedit failed: {e}")
 
 def compute_split_rhat(chain):
-    # calculates the split-rhat statistic for convergence
+    # Computes the Gelman Rubin convergence statistic or split R hat to assess if the MCMC chains have mixed well
     n_steps, n_walkers, n_params = chain.shape
     half = n_steps // 2
     split_chain = np.concatenate((chain[:half], chain[half:]), axis=1)

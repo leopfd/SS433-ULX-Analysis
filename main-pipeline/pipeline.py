@@ -14,29 +14,32 @@ def run():
 
     start_time = time.time()
 
-    # stage 1: fit images
+    # Stage 1 Image Fitting
+    # Processes raw observation files to fit spatial models and extract component centroids
     print("\n=== stage 1: fitting images ===\n")
     fit_images.run_pipeline()
     
-    # stage 2: track components
+    # Stage 2 Component Tracking
+    # Aggregates individual fit results to track component movement over time
     print("\n=== stage 2: tracking components ===\n")
-    # capture the dataframe returned by the tracker
     tracker_df = track_components.run_tracker_analysis()
 
     if tracker_df is None or tracker_df.empty:
         print("critical error: stage 2 returned no data. aborting.")
         sys.exit(1)
 
-    # stage 3: kinematic fitting
+    # Stage 3 Kinematic Fitting
+    # Uses the tracked component trajectories to model jet kinematics and ejection dates
     print("\n=== stage 3: kinematic fitting ===\n")
-    # pass tracker_df into the kinematic fitter
     ejection_df = model_kinematics.run_kinematic_analysis(tracker_df)
+    print(ejection_df)
     
     if ejection_df is None or ejection_df.empty:
         print("critical error: stage 3 returned no results. aborting.")
         sys.exit(1)
 
-    # stage 4: swift comparison
+    # Stage 4 External Data Comparison
+    # Compares the calculated kinematic ejection times with external Swift X ray data
     print("\n=== stage 4: swift comparison ===\n")
     lib.swift_compare.plot_swift_comparison(tracker_df, ejection_df)
 

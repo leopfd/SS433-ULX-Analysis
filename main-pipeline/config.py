@@ -1,7 +1,7 @@
 import os
 import numpy as np
 
-# defaults
+# Default configuration values used as fallbacks if no command line arguments are provided
 BASE_DIR = '/Users/leodrake/Documents/ss433/HRC_2024'
 NUM_COMPS = 4
 SIGMA_VAL = 1
@@ -14,11 +14,11 @@ SIGNIFIERS = ['mcmc']
 EPHEM_CHOICE = 'simple'
 OBS_SELECTION = None
 
-# output path placeholders
+# Global variables for file paths and IDs that will be dynamically generated later
 FILE_ID = ""
 FITS_DIR = ""
 
-# subdirectories
+# Subdirectory paths to be created within the main FITS directory
 DIR_LOGS_FULL = ""
 DIR_LOGS_MULTI = ""
 DIR_PLOTS_FULL = ""   
@@ -29,7 +29,7 @@ DIR_DATA = ""
 DIR_TRACKER_PLOTS = ""
 DIR_JET_PLOTS = ""
 
-# specific file paths
+# Specific file paths for logging and output
 FULL_LOG_TXT = ""       
 MULTI_LOG_TXT = ""      
 FIT_PLOT_PDF = ""       
@@ -37,11 +37,11 @@ MULTI_FIT_PDF = ""
 TRACKER_TABLE_CSV = ""
 PLOT_OUTPUT_PDF = ""
 
-# Swift / External Data
+# Swift and External Data configuration
 SWIFT_FILE = "/Users/leodrake/Documents/ss433/swift-hrc-data.txt"
-HRC_SCALE_FACTOR = 10.0
+HRC_SCALE_FACTOR = 15.0
 
-# constants
+# Physics constants and unit conversions
 CENTER_PIXEL = None 
 G1_COMPONENT = 'core'
 D_SS433_PC = 5500.0
@@ -49,6 +49,7 @@ C_PC_PER_DAY = (299792.458 * 86400) / (3.08567758 * 10**13)
 ARCSEC_PER_RADIAN = (180.0 / np.pi) * 3600.0
 EMP_PSF_FILE = os.path.join(BASE_DIR, 'empPSF_iARLac_v2025_2017-2025.fits')
 
+# Mapping of Observation IDs to their Right Ascension and Declination strings
 OBSID_COORDS = {
     "26568": ("287.9565362", "4.9826061"),
     "26569": ("287.9563218", "4.9827745"),
@@ -64,6 +65,7 @@ OBSID_COORDS = {
     "26579": ("287.9565733", "4.9825774")
 }
 
+# Ephemeris model definitions
 EPHEMERIS = {} 
 EPHEM_SIMPLE = {
     'model_type': 'simple',
@@ -80,6 +82,8 @@ EPHEM_SIMPLE = {
     'prec_pa': np.radians(10.0), 
     'prec_pa_err': 0.0 
 }
+
+# Full ephemeris model including nutation and orbital parameters
 EPHEM_FULL = {
     'model_type': 'full',
     **EPHEM_SIMPLE,
@@ -97,6 +101,7 @@ EPHEM_FULL = {
 }
 
 def update_config_from_args(args=None):
+    # Bring in global variables to update them based on arguments or derived calculations
     global NUM_COMPS, SIGMA_VAL, BIN_SIZE, RUN_MCMC, RECALC_CHAINS
     global MCMC_ITER, MCMC_BALL, AUTO_STOP, SIGNIFIERS, EPHEM_CHOICE, BASE_DIR
     global FILE_ID, FITS_DIR, CENTER_PIXEL
@@ -107,6 +112,7 @@ def update_config_from_args(args=None):
     global SWIFT_FILE, HRC_SCALE_FACTOR
     global OBS_SELECTION
 
+    # Update configuration if command line arguments are present
     if args:
         if args.base_dir: BASE_DIR = args.base_dir
         NUM_COMPS = args.comps
@@ -121,6 +127,7 @@ def update_config_from_args(args=None):
         EPHEM_CHOICE = args.ephem
         OBS_SELECTION = args.obs
 
+    # Format the step count string for filename inclusion using k notation for large numbers
     if MCMC_ITER > 9999:
         step_str = f"{int(MCMC_ITER/1000)}k"
     else:
@@ -129,11 +136,13 @@ def update_config_from_args(args=None):
     if step_str not in SIGNIFIERS:
         SIGNIFIERS.append(step_str)
 
+    # Select the appropriate ephemeris dictionary based on user choice
     if EPHEM_CHOICE == 'full':
         EPHEMERIS = EPHEM_FULL
     else:
         EPHEMERIS = EPHEM_SIMPLE
 
+    # Parse observation selection string to create a compact identifier for the filename
     if OBS_SELECTION:
         parts = OBS_SELECTION.split(',')
         short_parts = []
@@ -145,9 +154,10 @@ def update_config_from_args(args=None):
             else:
                 short_parts.append(p[-2:])
         
-        # Add to signifiers list so it becomes part of the dash-separated ID
+        # Add to signifiers list so it becomes part of the hyphenated ID
         SIGNIFIERS.append("_".join(short_parts))
 
+    # Define directory structure relative to the base directory
     FITS_DIR = os.path.join(BASE_DIR, '2Dfits')
     DIR_LOGS_FULL = os.path.join(FITS_DIR, 'fit results')
     DIR_LOGS_MULTI = os.path.join(FITS_DIR, 'multi comp fit results')
@@ -159,18 +169,22 @@ def update_config_from_args(args=None):
     DIR_TRACKER_PLOTS = os.path.join(FITS_DIR, 'comp tracker plots')
     DIR_JET_PLOTS = os.path.join(FITS_DIR, 'jet plots')
 
+    # Ensure all directories exist
     for d in [FITS_DIR, DIR_LOGS_FULL, DIR_LOGS_MULTI, DIR_PLOTS_FULL, DIR_PLOTS_MULTI, DIR_CHAINS, DIR_TRACKER, DIR_DATA, DIR_TRACKER_PLOTS, DIR_JET_PLOTS]:
         os.makedirs(d, exist_ok=True)
 
+    # Calculate center pixel coordinate based on logical width and bin size
     logical_width = 40.0 / BIN_SIZE 
     CENTER_PIXEL = (logical_width / 2.0) + 0.5
 
+    # Generate the unique File ID string used for naming all output files
     bin_str = str(BIN_SIZE).replace('.', 'p')
     sigma_str = str(SIGMA_VAL) 
     signifiers_str = "-".join(SIGNIFIERS)
     
     FILE_ID = f"{NUM_COMPS}comp-{sigma_str}sigma-{signifiers_str}-bin{bin_str}"
 
+    # Construct full file paths using the generated File ID
     FULL_LOG_TXT = os.path.join(DIR_LOGS_FULL, f'fit-results-{FILE_ID}.txt')
     MULTI_LOG_TXT = os.path.join(DIR_LOGS_MULTI, f'multi-comp-fit-results-{FILE_ID}.txt')
     FIT_PLOT_PDF = os.path.join(DIR_PLOTS_FULL, f'fit-plots-{FILE_ID}.pdf')
@@ -188,7 +202,7 @@ def update_config_from_args(args=None):
         print(f"\n")
 
 def get_rel_path(path):
-    """Returns the path relative to BASE_DIR for cleaner printing."""
+    # Returns the path relative to BASE_DIR for cleaner printing
     try:
         return os.path.relpath(path, BASE_DIR)
     except ValueError:
