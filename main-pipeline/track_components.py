@@ -12,6 +12,7 @@ from lib.arguments import get_pipeline_args
 def run_tracker_analysis():
     df = None
     
+    # Check if a tracker table already exists to avoid re-parsing logs
     if os.path.exists(config.TRACKER_TABLE_CSV):
         print(f"Loading existing tracker table: {config.get_rel_path(config.TRACKER_TABLE_CSV)}")
         try:
@@ -21,8 +22,9 @@ def run_tracker_analysis():
             raise
             
     else:
+        # Parse the multi-component log file if no existing table is found
         print("No existing tracker table found. Running Auto-Tracker...")
-        print(f"———>Loading and processing logs: {config.get_rel_path(config.MULTI_LOG_TXT)}")
+        print(f"Loading and processing logs: {config.get_rel_path(config.MULTI_LOG_TXT)}")
         df = load_sherpa_log_to_dataframe(config.MULTI_LOG_TXT)
 
         if df.empty:
@@ -31,52 +33,54 @@ def run_tracker_analysis():
         df.to_csv(config.TRACKER_TABLE_CSV, index=False)
         print(f"Tracker table saved to: {config.TRACKER_TABLE_CSV}")
 
-
+    # Isolate the core component to serve as the reference point for relative positioning
     ref_df = df[df['component'] == config.G1_COMPONENT][['obs_id', 'xpos', 'ypos']]
     ref_df = ref_df.rename(columns={'xpos': 'ref_x', 'ypos': 'ref_y'})
 
     df = df.merge(ref_df, on='obs_id', how='left')
     
-    # Fill missing refs with center pixel (for cases where core fit failed but others exist)
+    # Fill missing reference coordinates with the center pixel for observations where the core fit failed
     df['ref_x'] = df['ref_x'].fillna(config.CENTER_PIXEL)
     df['ref_y'] = df['ref_y'].fillna(config.CENTER_PIXEL)
     
+    # Calculate the shift required to center the reference component
     df['dx'] = df['ref_x'] - config.CENTER_PIXEL
     df['dy'] = df['ref_y'] - config.CENTER_PIXEL
     
-    # Apply shift
+    # Apply the calculated shift to all component positions
     df['xpos'] -= df['dx']
     df['ypos'] -= df['dy']
     
-    # Drop temp columns
+    # Drop temporary columns used for calculation
     df.drop(columns=['dx', 'dy', 'ref_x', 'ref_y'], inplace=True)
 
-    # Calculate Offsets
+    # Calculate offsets relative to the center pixel
     df['xoff'] = df['xpos'] - config.CENTER_PIXEL
     df['yoff'] = df['ypos'] - config.CENTER_PIXEL
 
-    # Calculate PA and Radius
+    # Convert Cartesian offsets to Polar coordinates (Position Angle and Radius)
     pa_rad = np.arctan2(-df['xoff'], df['yoff'])
     df['PA'] = np.degrees(pa_rad)
     df['pa_rad'] = pa_rad 
 
-    # Propagate Errors (PA)
+    # Propagate errors for Position Angle calculation
     d2 = df['xoff']**2 + df['yoff']**2
-    # Avoid divide by zero warnings
+    
+    # Handle division by zero for components exactly at the center
     dpa_dx = np.divide(-df['yoff'], d2, out=np.full_like(d2, np.nan), where=d2 != 0)
     dpa_dy = np.divide(df['xoff'], d2, out=np.full_like(d2, np.nan), where=d2 != 0)
 
     df['PA_err_plus'] = np.degrees(np.sqrt((dpa_dx * df['xpos_plus'])**2 + (dpa_dy * df['ypos_plus'])**2))
     df['PA_err_minus'] = np.degrees(np.sqrt((dpa_dx * df['xpos_minus'])**2 + (dpa_dy * df['ypos_minus'])**2))
     
-    # Propagate Errors (Radius)
+    # Propagate errors for Radius calculation
     pixscale_arcsec = 0.13175 * config.BIN_SIZE 
     df['radius'] = np.hypot(df['xoff'], df['yoff']) * pixscale_arcsec
 
     r_pix = df['radius'] / pixscale_arcsec
     is_zero = np.isclose(r_pix, 0)
     
-    # Helper for radius error calculation
+    # Calculate radius errors handling the special case where radius is near zero
     df['radius_plus_err'] = np.where(
         is_zero, 
         np.hypot(df['xpos_plus'], df['ypos_plus']), 
@@ -89,15 +93,15 @@ def run_tracker_analysis():
         np.sqrt((df['xoff']*df['xpos_minus'])**2 + (df['yoff']*df['ypos_minus'])**2)/r_pix
     ) * pixscale_arcsec
 
-    # Sort by date for plotting cleanliness
+    # Sort data chronologically by Modified Julian Date (MJD)
     if 'mjd' in df.columns:
         df.sort_values('mjd', inplace=True)
     
     df['flag'] = 'clean'
 
-    # Step 3: Plotting
+    # Pivot data to organize flux/rate values by component for easier plotting
     pivoted = df.pivot_table(index='mjd', columns='component', values=['nominal', 'plus_err', 'minus_err'])
-    # Handle case where pivot might be empty or missing columns safely
+    
     try:
         df_nom, df_plus, df_minus = [pivoted[val].sort_index() for val in ['nominal', 'plus_err', 'minus_err']]
     except KeyError:
@@ -105,24 +109,32 @@ def run_tracker_analysis():
         return df
 
     grouped_by_comp = df.groupby('component')
-    comps = [c for c in df_nom.columns if c != config.G1_COMPONENT]
     
+    # Identify non-core components for analysis
+    comps = [c for c in df_nom.columns if not (c == 'core' or c == 'bkg')]
+    
+    # Assign colormaps based on component direction or type
     comp_cmaps = {}
+    
     for c in comps:
-        if c == 'east': comp_cmaps[c] = plt.cm.Blues
-        elif c == 'west': comp_cmaps[c] = plt.cm.Reds
-        elif c.startswith('extra'): comp_cmaps[c] = plt.cm.Greens
-        else: comp_cmaps[c] = plt.cm.Purples
+        if c.startswith('east'):
+            comp_cmaps[c] = plt.cm.Blues
+        elif c.startswith('west'):
+            comp_cmaps[c] = plt.cm.Reds
+        elif c.startswith('other'):
+            comp_cmaps[c] = plt.cm.Greens 
+        else:
+            comp_cmaps[c] = plt.cm.Purples
 
     time_min, time_max = df['mjd'].min(), df['mjd'].max()
     time_norm = plt.Normalize(vmin=time_min, vmax=time_max)
         
     n = len(comps)
-    # Handle empty comps list
     if n == 0:
         print("Warning: No components found to plot.")
         return df
 
+    # Define visual offsets for grouped plotting
     delta = 0.02
     offsets = {c: (i - (n - 1) / 2) * delta for i, c in enumerate(comps)}
     
@@ -133,10 +145,11 @@ def run_tracker_analysis():
         discrete_colors = ['dodgerblue', 'mediumseagreen', 'mediumslateblue', 'lightcoral']
         comp_discrete_map = {comp: discrete_colors[i % len(discrete_colors)] for i, comp in enumerate(comps)}
 
-        # Figure 1: PA and Rates
+        # Plot 1 Position Angle and Count Rates
         fig = plt.figure(figsize=(12, 6))
         gs  = GridSpec(n, 2, figure=fig, width_ratios=[1,1], hspace=0, wspace=0.3)
 
+        # Left Panel Position Angle vs Time
         ax_pa = fig.add_subplot(gs[:,0])
         for comp, color in comp_discrete_map.items():
             if comp in grouped_by_comp.groups:
@@ -150,6 +163,7 @@ def run_tracker_analysis():
         ax_pa.grid(True)
         ax_pa.legend()
 
+        # Right Panel Stacked Count Rates
         ax_bottom = None
         for i_comp, focus in reversed(list(enumerate(comps))):
             if i_comp == n - 1:
@@ -181,7 +195,7 @@ def run_tracker_analysis():
         pdf.savefig(fig)
         plt.close(fig) 
 
-        # Figure 2: Polar Plot
+        # Plot 2 Polar Plot of Sky Positions
         fig_polar = plt.figure(figsize=(10, 8))
         ax_polar = fig_polar.add_subplot(111, projection='polar')
         ax_polar.set_theta_zero_location('N')
@@ -207,6 +221,7 @@ def run_tracker_analysis():
 
                     ax_polar.errorbar(p_rad, rad, xerr=[[pa_min], [pa_pl]], yerr=[[r_min], [r_pl]], marker='.', linestyle='', color=t_color, capsize=2, markersize=8)
 
+        # Add colorbar for time evolution
         sm = plt.cm.ScalarMappable(cmap=plt.cm.Greys, norm=time_norm)
         sm.set_array([])
         cbar = plt.colorbar(sm, ax=ax_polar, pad=0.1)
@@ -231,7 +246,6 @@ def run_tracker_analysis():
     
     print(f"\nplots saved to: {config.get_rel_path(pdf_filename)}")
     
-    # Return processed dataframe
     return df
 
 if __name__ == "__main__":
