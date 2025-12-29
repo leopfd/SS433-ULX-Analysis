@@ -5,95 +5,100 @@ import config
 from lib.physics import fit_and_calculate_jets, _get_closest_geometric_point
 from lib.plotting import plot_fit_and_calc_results
 from lib.arguments import get_pipeline_args
-
-# Import the tracker so we can get data in standalone mode
 import track_components
 
 def run_kinematic_analysis(input_df):
+    # Initialize configuration parameters and output containers
     ss433_params = config.EPHEMERIS
-    
-    # use dynamic plot output path
     pdf_output_path = config.PLOT_OUTPUT_PDF
-    
     pdf_pages = PdfPages(pdf_output_path)
     all_results_data = []
 
-    # Use the dataframe passed from the tracker (Pipeline or Standalone)
     df = input_df.copy()
 
-    is_first_iteration = True
-    
+    # Iterate through each observation group independently to model kinematics per epoch
     for obs_id, group in df.groupby('obs_id'):
-        blue_data = group[group['component'] == 'east']
-        if group.empty or blue_data.empty: continue
-        red_data = group[group['component'] == 'west']
+        # Separate data into east and west components based on naming convention
+        east_data = group[group['component'].str.startswith('east', na=False)]
+        west_data = group[group['component'].str.startswith('west', na=False)]
+        
+        # Skip observation if no valid jet components are found
+        if east_data.empty and west_data.empty: 
+            continue
 
-        if len(blue_data) == 1 and len(red_data) == 1:
-            blue_row = blue_data.iloc[0]
-            red_row = red_data.iloc[0]
+        # Convert DataFrame rows into a standardized dictionary format for the physics module
+        blob_data_list = []
+        def row_to_blob(r):
+            return {
+                'mjd_obs': r['mjd'], 'comp': r['component'], 
+                'pa_obs': r['PA'], 'rad_obs': r['radius'], 
+                'rad_err_U': r['radius_plus_err'], 'rad_err_L': r['radius_minus_err'], 
+                'pa_err_U': r['PA_err_plus'], 'pa_err_L': r['PA_err_minus']
+            }
+
+        for _, row in east_data.iterrows(): blob_data_list.append(row_to_blob(row))
+        for _, row in west_data.iterrows(): blob_data_list.append(row_to_blob(row))
+
+        # Perform jet physics fitting and kinematic calculations
+        analysis_results = fit_and_calculate_jets(blob_data_list, ss433_params)
+
+        if analysis_results['success']:
+            # Generate diagnostic plots if the fit was successful
+            plot_fit_and_calc_results(obs_id, blob_data_list, analysis_results, ss433_params, pdf_object=pdf_pages)
             
-            blob_pair_data = [
-                {'mjd_obs': blue_row['mjd'], 'comp': 'east', 'pa_obs': blue_row['PA'], 'rad_obs': blue_row['radius'], 'rad_err_U': blue_row['radius_plus_err'], 'rad_err_L': blue_row['radius_minus_err'], 'pa_err_U': blue_row['PA_err_plus'], 'pa_err_L': blue_row['PA_err_minus']},
-                {'mjd_obs': red_row['mjd'], 'comp': 'west', 'pa_obs': red_row['PA'], 'rad_obs': red_row['radius'], 'rad_err_U': red_row['radius_plus_err'], 'rad_err_L': red_row['radius_minus_err'], 'pa_err_U': red_row['PA_err_plus'], 'pa_err_L': red_row['PA_err_minus']}
-            ]
-            
-            reg_strength = 0 if not is_first_iteration else 0
-            is_first_iteration = False
-
-            analysis_results = fit_and_calculate_jets(blob_pair_data, ss433_params, regularization_strength=reg_strength)
-
-            if analysis_results['success']:
-                plot_fit_and_calc_results(obs_id, blob_pair_data, analysis_results, ss433_params, pdf_object=pdf_pages)
+            # Extract results for both jet sides and format them for the final table
+            for jet_side in ['east', 'west']:
+                jet_entries = analysis_results['jets'][jet_side] 
+                candidates = analysis_results[f'{jet_side}_candidates']
                 
-                for jet_color in ['blue', 'red']:
-                    jet_info = analysis_results['jets'][jet_color]
-                    blob_data = blob_pair_data[0] if jet_color == 'blue' else blob_pair_data[1]
+                for i, result_info in enumerate(jet_entries):
+                    blob = candidates[i]
+                    
                     row = {
                         'obs_id': obs_id,
                         'mjd': analysis_results['mjd_obs'],
-                        'jet_color': jet_color,
-                        'component_name': blob_data['comp'],
-                        'method': jet_info['method'],
+                        'jet_side': jet_side,
+                        'component_name': blob['comp'],
+                        'method': result_info['method'],
                         'beta': np.nan,
                         'beta_err_pos': np.nan,
                         'beta_err_neg': np.nan,
                         'travel_time_days': np.nan
                     }
 
-                    if jet_info['method'] == 'fit':
-                        beta_val = jet_info.get('fitted_beta')
-                        lower = jet_info.get('beta_lower_bound')
-                        upper = jet_info.get('beta_upper_bound')
-                        row['beta'] = beta_val
-                        if pd.notna(lower) and pd.notna(upper):
-                            row['beta_err_pos'] = upper - beta_val
-                            row['beta_err_neg'] = beta_val - lower
-                        fitted_point = _get_closest_geometric_point(blob_data, jet_color, analysis_results, ss433_params)
-                        row['travel_time_days'] = fitted_point.get('model_age')
-                    else:
-                        row['beta'] = ss433_params['beta'] 
-                        row['travel_time_days'] = jet_info.get('travel_time')
+                    # Populate beta velocity values
+                    beta_val = result_info.get('fitted_beta')
+                    row['beta'] = beta_val
+                    
+                    # Calculate asymmetric errors for beta if bounds are available
+                    lower = result_info.get('beta_lower_bound')
+                    upper = result_info.get('beta_upper_bound')
+                    if pd.notna(lower) and pd.notna(upper):
+                        row['beta_err_neg'] = beta_val - lower
+                        row['beta_err_pos'] = upper - beta_val
+                        
+                    # Calculate the theoretical travel time based on the geometric model
+                    fitted_point = _get_closest_geometric_point(blob, jet_side, analysis_results, ss433_params)
+                    row['travel_time_days'] = fitted_point.get('model_age')
                     
                     all_results_data.append(row)
-            else:
-                print(f"--> processing failed for {obs_id}: {analysis_results.get('message', 'n/a')}")
         else:
-            print(f"--> skipping {obs_id}: did not find a valid blue/red jet pair.")
+            print(f"--> processing failed for {obs_id}: {analysis_results.get('message', 'n/a')}")
 
+    # Finalize PDF output and report completion
     pdf_pages.close()
     print(f"\nall plots saved to '{config.get_rel_path(pdf_output_path)}'")
     
-    # Return the results so the pipeline can pass them to stage 4
     return pd.DataFrame(all_results_data)
 
 if __name__ == "__main__":
+    # Load command line arguments and update global configuration
     args = get_pipeline_args()
     config.update_config_from_args(args)
-
-    print("Running standalone: fetching data from tracker...")
+    
+    # Run tracker analysis first to get component positions
     tracker_df = track_components.run_tracker_analysis()
     
+    # Proceed to kinematic analysis only if valid tracker data exists
     if tracker_df is not None and not tracker_df.empty:
         run_kinematic_analysis(tracker_df)
-    else:
-        print("Error: Tracker returned no data.")
