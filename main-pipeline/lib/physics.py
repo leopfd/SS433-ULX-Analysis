@@ -4,63 +4,148 @@ from scipy.optimize import minimize  # kept for compatibility
 import config
 
 
-# Utilities for grid generation and coordinate transformation
-def _age_curve_one_cycle(params, n, min_age=0.0, frac_period=0.99):
+def _age_curve_one_cycle(params, n=None, min_age=0.0, frac_period=2):
     """
-    Construct an age grid limited to a fraction of one precession cycle
-    The fraction is kept below 1 to avoid ambiguity between phase 0 and phase 1
-    which represent the same direction in the cycle
+    Construct an age grid limited to a fraction of one precession cycle.
+    All fitting/interval/closest-point logic must use the same grid to be consistent.
     """
     P = float(params["precession_period"])
     max_age = frac_period * P
-    
-    # Validation check to prevent generating an inverted or empty time grid
     if max_age <= min_age:
         raise ValueError(f"Bad age grid: max_age={max_age} <= min_age={min_age}")
-    return np.linspace(min_age, max_age, n)
+
+    if n is None:
+        n = int(params.get("age_grid_n", 1200))
+    return np.linspace(min_age, max_age, int(n))
 
 
 def _wrap_deg(angle_deg):
     """
-    Wrap degrees to be within the range of negative 180 to positive 180
+    Wrap degrees to be within [-180, +180).
     """
     return (angle_deg + 180.0) % 360.0 - 180.0
 
 
+def _sigma_r_pa(blob_data):
+    """
+    Symmetric 1-sigma uncertainties in (r, PA) from existing +/- errors.
+    """
+    sig_r = (float(blob_data["rad_err_U"]) + abs(float(blob_data["rad_err_L"]))) / 2.0
+    sig_pa = (float(blob_data["pa_err_U"]) + abs(float(blob_data["pa_err_L"]))) / 2.0
+    sig_r = max(sig_r, 1e-6)
+    sig_pa = max(sig_pa, 1e-3)
+    return sig_r, sig_pa
+
+
+def _polar_inside_mask(rad_curve, pa_deg_curve, blob):
+    """
+    Inside the 1-sigma polar error box:
+      |dr| <= sigma_r AND |dPA| <= sigma_PA.
+    """
+    r0 = float(blob["rad_obs"])
+    pa0 = float(blob["pa_obs"])
+    sig_r, sig_pa = _sigma_r_pa(blob)
+
+    dr = np.abs(rad_curve - r0)
+    dpa = np.abs(_wrap_deg(pa_deg_curve - pa0))
+    return (dr <= sig_r) & (dpa <= sig_pa)
+
+
+def _polar_misfit(rad_curve, pa_deg_curve, blob):
+    """
+    Dimensionless misfit used for closest-point selection:
+      (dr/sig_r)^2 + (dPA/sig_PA)^2.
+    """
+    r0 = float(blob["rad_obs"])
+    pa0 = float(blob["pa_obs"])
+    sig_r, sig_pa = _sigma_r_pa(blob)
+
+    dr = (rad_curve - r0) / sig_r
+    dpa = _wrap_deg(pa_deg_curve - pa0) / sig_pa
+    return dr * dr + dpa * dpa
+
+
+def _curve_rad_pa_deg(age_curve, jd_ej_curve, params, jet_side, beta_e, beta_w):
+    """
+    Compute model (rad, PA) arrays on the provided grid for a given jet side and betas.
+    """
+    mu_e_ra, mu_e_dec, mu_w_ra, mu_w_dec, pa_e, pa_w = ss433_phases(
+        jd_ej_curve, params, beta_east=beta_e, beta_west=beta_w
+    )
+
+    if jet_side == "east":
+        mu_ra, mu_dec = mu_e_ra, mu_e_dec
+        pa_deg_curve = pa_e
+    else:
+        mu_ra, mu_dec = mu_w_ra, mu_w_dec
+        pa_deg_curve = pa_w
+
+    rad_curve = (
+        np.sqrt(mu_ra**2 + mu_dec**2)
+        * config.C_PC_PER_DAY
+        * age_curve
+        / config.D_SS433_PC
+    ) * config.ARCSEC_PER_RADIAN
+
+    return rad_curve, pa_deg_curve
+
+def _blob_intersects_at_beta(blob, params, mjd_obs, jet_side, beta_e, beta_w):
+    age_curve = _age_curve_one_cycle(params)
+    jd_ej_curve = (mjd_obs + 2400000.5) - age_curve
+
+    win = _canonical_age_window_mask(age_curve, jd_ej_curve, params, jet_side, blob)
+    rad_curve, pa_curve = _curve_rad_pa_deg(age_curve, jd_ej_curve, params, jet_side, beta_e, beta_w)
+
+    if np.any(win):
+        return bool(np.any(_polar_inside_mask(rad_curve[win], pa_curve[win], blob)))
+    return bool(np.any(_polar_inside_mask(rad_curve, pa_curve, blob)))
+
+
+def _canonical_age_window_mask(age_curve, jd_ej_curve, params, jet_side, blob):
+    """
+    Define an age window centered on the closest point found on the canonical-beta curve.
+    This prevents matching a knot to a different precession-phase branch.
+    """
+    age_window_days = float(params.get("age_window_days", 17.0))
+    beta_ref = float(params["beta"])
+
+    rad_ref, pa_ref = _curve_rad_pa_deg(
+        age_curve, jd_ej_curve, params, jet_side, beta_ref, beta_ref
+    )
+
+    mis = _polar_misfit(rad_ref, pa_ref, blob)
+    idx0 = int(np.argmin(mis))
+    t0 = float(age_curve[idx0])
+
+    return (age_curve >= t0 - age_window_days) & (age_curve <= t0 + age_window_days)
+
+
 def _calculate_cartesian_obs_and_errors(blob_data):
     """
-    Converts polar observation data into Cartesian coordinates and 
-    propagates the measurement errors
+    Convert polar observation to cartesian with propagated errors.
+    Kept for compatibility with plotting/diagnostics that assume cartesian sigmas.
     """
     pa_rad = np.deg2rad(blob_data["pa_obs"])
-    
-    # Convert polar (radius, angle) to Cartesian (x, y)
+
     x_obs = blob_data["rad_obs"] * np.sin(pa_rad)
     y_obs = blob_data["rad_obs"] * np.cos(pa_rad)
 
-    # Average the upper and lower error bounds to get a single sigma value
     sig_r = (blob_data["rad_err_U"] + abs(blob_data["rad_err_L"])) / 2.0
     sig_pa_deg = (blob_data["pa_err_U"] + abs(blob_data["pa_err_L"])) / 2.0
     sig_pa_rad = np.deg2rad(sig_pa_deg)
 
-    # Propagate the radial and angular errors into Cartesian x and y errors
-    # using the standard Jacobian approximation for polar-to-cartesian transformation
     sig_x_sq = (np.sin(pa_rad) * sig_r) ** 2 + (blob_data["rad_obs"] * np.cos(pa_rad) * sig_pa_rad) ** 2
     sig_y_sq = (np.cos(pa_rad) * sig_r) ** 2 + (blob_data["rad_obs"] * -np.sin(pa_rad) * sig_pa_rad) ** 2
 
-    # Floor errors to a small positive value (epsilon) to prevent divide by zero exceptions
-    # during later Chi-squared calculations
     sig_x_sq = max(sig_x_sq, 1e-9)
     sig_y_sq = max(sig_y_sq, 1e-9)
 
     return x_obs, y_obs, sig_x_sq, sig_y_sq
 
 
-# Model Definitions
 def get_precession_limits(params):
     """
-    Determine the bounding box of the jet path on the sky over one full cycle
-    Useful for setting plot limits or filtering outliers
+    Determine min/max PA over one full cycle for east/west jets.
     """
     num_points = 720
     jd_cycle = params["jd0_precession"] + np.linspace(0, params["precession_period"], num_points)
@@ -75,9 +160,8 @@ def get_precession_limits(params):
 
 def ss433_phases(jd_obs, params, beta_east=None, beta_west=None):
     """
-    Calculate the kinematic model for SS433 at specific observation dates
-    This includes precession and optionally nutation and orbital modulation
-    Returns proper motion vectors and position angles
+    Kinematic model for SS433:
+      returns (mu_e_ra, mu_e_dec, mu_w_ra, mu_w_dec, pa_east, pa_west).
     """
     inc, chi = params["inclination"], params["prec_pa"]
     base_beta_e = beta_east if beta_east is not None else params["beta"]
@@ -87,17 +171,13 @@ def ss433_phases(jd_obs, params, beta_east=None, beta_west=None):
     effective_beta_e = base_beta_e
     effective_beta_w = base_beta_w
 
-    # Calculate the precession phase (0 to 1) based on the reference Julian Date
     prec_phase = ((jd_obs - params["jd0_precession"]) / params["precession_period"]) % 1.0
-    
-    # Adjust phase definition based on whether we are using the simple or full ephemeris model
+
     if params.get("model_type") == "full":
         phi = params["phi0"] - 2 * np.pi * prec_phase
     else:
         phi = -2 * np.pi * prec_phase
 
-    # Apply perturbations if the full ephemeris model is selected
-    # This adds nutation to the cone opening angle (theta) and orbital variation to velocity (beta)
     if params.get("model_type") == "full":
         orb_phase = ((jd_obs - params["jd0_orb"]) / params["orbital_period"]) % 1.0
         nut_phase = ((jd_obs - params["jd0_nut"]) / params["nut_period"]) % 1.0
@@ -111,176 +191,160 @@ def ss433_phases(jd_obs, params, beta_east=None, beta_west=None):
     sin_phi, cos_phi = np.sin(phi), np.cos(phi)
     sin_chi, cos_chi = np.sin(chi), np.cos(chi)
 
-    # Calculate projection unit vectors for the jet orientation
-    # mu is the component along the line of sight
     mu = sin_theta * sin_inc * cos_phi + cos_theta * cos_inc
-    
-    # v_ra and v_dec represent the vector components in the plane of the sky
-    v_ra = (sin_chi * sin_theta * sin_phi
-            + cos_chi * sin_inc * cos_theta
-            - cos_chi * cos_inc * sin_theta * cos_phi)
-    v_dec = (cos_chi * sin_theta * sin_phi
-             - sin_chi * sin_inc * cos_theta
-             + sin_chi * cos_inc * sin_theta * cos_phi)
 
-    # Compute proper motions for West (receding) and East (approaching) jets
-    # The denominator (1 +/- beta * mu) accounts for relativistic time dilation / light travel time effects
+    v_ra = (
+        sin_chi * sin_theta * sin_phi
+        + cos_chi * sin_inc * cos_theta
+        - cos_chi * cos_inc * sin_theta * cos_phi
+    )
+    v_dec = (
+        cos_chi * sin_theta * sin_phi
+        - sin_chi * sin_inc * cos_theta
+        + sin_chi * cos_inc * sin_theta * cos_phi
+    )
+
     mu_west_ra = -effective_beta_w * v_ra / (1 + effective_beta_w * mu)
     mu_west_dec = -effective_beta_w * v_dec / (1 + effective_beta_w * mu)
 
     mu_east_ra = effective_beta_e * v_ra / (1 - effective_beta_e * mu)
     mu_east_dec = effective_beta_e * v_dec / (1 - effective_beta_e * mu)
 
-    # Convert the proper motion vectors into position angles
     pa_east = np.degrees(np.arctan2(mu_east_ra, mu_east_dec))
     pa_west = np.degrees(np.arctan2(mu_west_ra, mu_west_dec))
 
     return mu_east_ra, mu_east_dec, mu_west_ra, mu_west_dec, pa_east, pa_west
 
 
-# Interval Helper Functions
+def ss433_mu_from_config_ephemeris(jd):
+    """
+    Returns (mu_east, mu_west) where mu = cos(theta_LOS), using config.EPHEMERIS.
+    """
+    p = config.EPHEMERIS
+
+    inc = p["inclination"]
+    theta = p["theta"]
+
+    prec_phase = ((jd - p["jd0_precession"]) / p["precession_period"]) % 1.0
+    phi = -2.0 * np.pi * prec_phase
+
+    mu_east = np.sin(theta) * np.sin(inc) * np.cos(phi) + np.cos(theta) * np.cos(inc)
+    mu_west = -mu_east
+    return mu_east, mu_west
+
+
+def tau_core_to_knot_days_from_projected(rad_arcsec, mu):
+    """
+    Core → knot light travel time tau = r/c using projected separation and mu = cos(theta_LOS).
+    """
+    sin_th = np.sqrt(np.maximum(0.0, 1.0 - mu * mu))
+    Rproj_pc = (rad_arcsec / config.ARCSEC_PER_RADIAN) * config.D_SS433_PC
+    return (Rproj_pc / config.C_PC_PER_DAY) / sin_th
+
+
 def get_valid_beta_interval(blob_data, params, mjd_obs, jet_side):
     """
-    Finds the range of beta values where the model trajectory intersects the error ellipse of the blob
-    Used to calculate error bars for the velocity
+    Return (beta_min, beta_max) where the model intersects the blob's polar 1-sigma box
+    within the blob's canonical-beta age window.
     """
-    age_curve = _age_curve_one_cycle(params, n=1000, min_age=0.0, frac_period=0.99)
+    age_curve = _age_curve_one_cycle(params)
     jd_ej_curve = (mjd_obs + 2400000.5) - age_curve
 
-    x_obs, y_obs, sig_x_sq, sig_y_sq = _calculate_cartesian_obs_and_errors(blob_data)
+    win = _canonical_age_window_mask(age_curve, jd_ej_curve, params, jet_side, blob_data)
 
     def check_beta(b):
-        beta_e = b if jet_side == "east" else params["beta"]
-        beta_w = b if jet_side == "west" else params["beta"]
+        b = float(b)
+        beta0 = float(params["beta"])
+        beta_e = b if jet_side == "east" else beta0
+        beta_w = b if jet_side == "west" else beta0
 
-        # Generate the kinematic model for this specific beta trial
-        mu_e_ra, mu_e_dec, mu_w_ra, mu_w_dec, _, _ = ss433_phases(
-            jd_ej_curve, params, beta_east=beta_e, beta_west=beta_w
-        )
+        rad_curve, pa_curve = _curve_rad_pa_deg(age_curve, jd_ej_curve, params, jet_side, beta_e, beta_w)
 
-        mu_ra = mu_e_ra if jet_side == "east" else mu_w_ra
-        mu_dec = mu_e_dec if jet_side == "east" else mu_w_dec
+        if np.any(win):
+            return bool(np.any(_polar_inside_mask(rad_curve[win], pa_curve[win], blob_data)))
 
-        # Convert proper motion rates to on sky separation in arcseconds
-        rad_curve = (
-            np.sqrt(mu_ra**2 + mu_dec**2)
-            * config.C_PC_PER_DAY
-            * age_curve
-            / config.D_SS433_PC
-        ) * config.ARCSEC_PER_RADIAN
-
-        pa_rad_curve = np.arctan2(mu_ra, mu_dec)
-        x_mod = rad_curve * np.sin(pa_rad_curve)
-        y_mod = rad_curve * np.cos(pa_rad_curve)
-
-        # Calculate Chi squared distance between model curve and the observation point
-        chi_sq_curve = ((x_mod - x_obs) ** 2 / sig_x_sq) + ((y_mod - y_obs) ** 2 / sig_y_sq)
-        
-        # Valid if the curve passes within 1 sigma of the observation
-        return np.min(chi_sq_curve) <= 1.0
+        return bool(np.any(_polar_inside_mask(rad_curve, pa_curve, blob_data)))
 
     betas = np.linspace(0.20, 0.30, 201)
-    valid_betas = [b for b in betas if check_beta(b)]
-    if not valid_betas:
+    valid = [b for b in betas if check_beta(b)]
+    if not valid:
         return None
-    return (min(valid_betas), max(valid_betas))
+    return (float(min(valid)), float(max(valid)))
 
 
-# Core Fitting Logic
 def _fit_single_side(blobs, params, mjd_obs, jet_side, regularization_strength=0.0):
     """
-    Fit beta for one side by brute force scan
-    The objective prioritizes crossing the error ellipses first
-    Prefer betas that enter the 1 sigma error ellipses of as many blobs as possible
-    Among betas with the same number of crossed blobs minimize total chi squared
-    Apply PA penalty and beta regularization as tie breakers
+    Choose beta by scanning a grid.
+
+    Primary objective: minimize number of blobs that never intersect the polar 1-sigma box
+    within their canonical-beta age window. If any beta yields zero misses, only those
+    candidates are eligible.
+
+    Secondary objective: minimize summed minimum polar misfit.
+
+    Tertiary objective: regularize toward params["beta"] with sigma=regularization_strength.
     """
     if not blobs:
-        return params["beta"], np.nan, np.nan, "no_data"
+        return float(params["beta"]), np.nan, np.nan, "no_data"
 
-    # Define the search grid for velocity (beta)
-    # Using a dense grid ensures we don't miss narrow solutions in the complex parameter space
-    test_betas = np.linspace(0.20, 0.30, 500)
-    # test_betas = np.arange(0.20, 0.3000001, 0.0001)
-
-    # Pre calculate the age curve for a full cycle to compare against all beta trials
-    age_curve = _age_curve_one_cycle(params, n=1200, min_age=0.0, frac_period=0.99)
+    age_curve = _age_curve_one_cycle(params)
     jd_ej_curve = (mjd_obs + 2400000.5) - age_curve
 
-    best_beta = params["beta"]
-    best_score = (np.inf, np.inf, np.inf, np.inf)  # n_outside, sum_chi, sum_pa_pen, reg_pen
+    beta0 = float(params["beta"])
+    test_betas = np.linspace(0.20, 0.30, int(params.get("beta_grid_n", 500)))
+
+    blob_wins = [_canonical_age_window_mask(age_curve, jd_ej_curve, params, jet_side, b) for b in blobs]
+
+    best_any = (np.inf, np.inf, np.inf)
+    best_any_beta = beta0
+
+    best_zero = (np.inf, np.inf, np.inf)
+    best_zero_beta = beta0
+    found_zero = False
 
     for b in test_betas:
-        # Generate the model track for this specific beta
+        b = float(b)
         if jet_side == "east":
-            mu_ra, mu_dec, _, _, pa_e, _ = ss433_phases(
-                jd_ej_curve, params, beta_east=b, beta_west=params["beta"]
-            )
-            pa_deg_curve = pa_e
+            rad_curve, pa_curve = _curve_rad_pa_deg(age_curve, jd_ej_curve, params, jet_side, b, beta0)
         else:
-            _, _, mu_ra, mu_dec, _, pa_w = ss433_phases(
-                jd_ej_curve, params, beta_east=params["beta"], beta_west=b
-            )
-            pa_deg_curve = pa_w
+            rad_curve, pa_curve = _curve_rad_pa_deg(age_curve, jd_ej_curve, params, jet_side, beta0, b)
 
-        # Convert angular rates to physical sky positions
-        rad_curve = (
-            np.sqrt(mu_ra**2 + mu_dec**2)
-            * config.C_PC_PER_DAY
-            * age_curve
-            / config.D_SS433_PC
-        ) * config.ARCSEC_PER_RADIAN
+        n_miss = 0
+        sum_mis = 0.0
 
-        pa_rad_curve = np.arctan2(mu_ra, mu_dec)
-        xm, ym = rad_curve * np.sin(pa_rad_curve), rad_curve * np.cos(pa_rad_curve)
+        for win, blob in zip(blob_wins, blobs):
+            if np.any(win):
+                r = rad_curve[win]
+                pa = pa_curve[win]
+            else:
+                r = rad_curve
+                pa = pa_curve
 
-        n_outside = 0
-        sum_chi = 0.0
-        sum_pa_pen = 0.0
+            if not np.any(_polar_inside_mask(r, pa, blob)):
+                n_miss += 1
 
-        # Evaluate this beta against every observed blob
-        for blob in blobs:
-            xo, yo, sx, sy = _calculate_cartesian_obs_and_errors(blob)
-            
-            # Find the minimum distance from this blob to the model curve
-            dist_sq = ((xm - xo) ** 2 / sx) + ((ym - yo) ** 2 / sy)
+            sum_mis += float(np.min(_polar_misfit(r, pa, blob)))
 
-            m = float(np.min(dist_sq))          # best chi^2 along curve for this blob
-            idx = int(np.argmin(dist_sq))       # where that best match occurs
-
-            # Primary criterion checks if the curve enters the 1 sigma ellipse
-            # If the closest point is > 1 sigma away it counts as a miss
-            if m > 1.0:
-                n_outside += 1
-
-            # Secondary criterion uses total closeness (sum of Chi squared)
-            sum_chi += m
-
-            # Tertiary criterion adds penalty if the Position Angle is misaligned
-            # This helps break ties where distance is similar but orientation is wrong
-            pa_obs = float(blob["pa_obs"])
-            sig_pa = (float(blob["pa_err_U"]) + abs(float(blob["pa_err_L"]))) / 2.0
-            sig_pa = max(sig_pa, 0.5)  # floor in degrees
-            dpa = _wrap_deg(pa_deg_curve[idx] - pa_obs)
-            sum_pa_pen += (dpa / sig_pa) ** 2
-
-        # Quaternary criterion penalizes deviation from the canonical beta value
-        # This keeps the solution physical if the data is ambiguous
         reg_pen = 0.0
         if regularization_strength and regularization_strength > 0:
             sigma_b = float(regularization_strength)
-            reg_pen = ((b - float(params["beta"])) / sigma_b) ** 2
+            reg_pen = ((b - beta0) / sigma_b) ** 2
 
-        score = (n_outside, sum_chi, sum_pa_pen, reg_pen)
+        score = (int(n_miss), float(sum_mis), float(reg_pen))
 
-        # Update best fit if this score is lower (better)
-        # Tuple comparison automatically prioritizes n_outside then sum_chi etc
-        if score < best_score:
-            best_score = score
-            best_beta = b
+        if score < best_any:
+            best_any = score
+            best_any_beta = b
 
-    # Determine confidence intervals logic
-    # We find the min/max beta that still intersects the error ellipses
+        if n_miss == 0:
+            found_zero = True
+            if score < best_zero:
+                best_zero = score
+                best_zero_beta = b
+
+    best_beta = best_zero_beta if found_zero else best_any_beta
+    best_score = best_zero if found_zero else best_any
+
     intervals = []
     for blob in blobs:
         ival = get_valid_beta_interval(blob, params, mjd_obs, jet_side)
@@ -296,26 +360,23 @@ def _fit_single_side(blobs, params, mjd_obs, jet_side, regularization_strength=0
     if intervals:
         global_min = max(i[0] for i in intervals)
         global_max = min(i[1] for i in intervals)
-
         if global_min <= global_max:
-            lower, upper = global_min, global_max
-            best_beta = np.clip(best_beta, lower, upper)
+            lower, upper = float(global_min), float(global_max)
+            best_beta = float(np.clip(best_beta, lower, upper))
         else:
             method = "fit (inconsistent)"
     else:
         method = "fit (outliers)"
 
-    # Add a hint if the best solution still missed some ellipses
-    if best_score[0] > 0 and method == "fit":
-        method = f"fit (missed {int(best_score[0])} ellipse{'s' if best_score[0] != 1 else ''})"
+    if int(best_score[0]) > 0 and method == "fit":
+        method = f"fit (missed {int(best_score[0])} ellipse{'s' if int(best_score[0]) != 1 else ''})"
 
-    return best_beta, lower, upper, method
+    return float(best_beta), lower, upper, method
 
 
 def fit_and_calculate_jets(blob_data_list, params, regularization_strength=0.0):
     """
-    Main driver function to fit jet kinematics
-    Separates data into East/West components and fits them independently
+    Fit east and west sides independently and return a dict matching downstream expectations.
     """
     if not blob_data_list:
         return {"success": False, "message": "no blob data"}
@@ -333,8 +394,6 @@ def fit_and_calculate_jets(blob_data_list, params, regularization_strength=0.0):
         "west_candidates": west_blobs,
     }
 
-    # Perform independent fits for East and West jets
-    # We allow regularization to be passed down to control beta deviation
     beta_e, low_e, up_e, meth_e = _fit_single_side(
         east_blobs, params, mjd_obs, "east", regularization_strength=regularization_strength
     )
@@ -346,63 +405,69 @@ def fit_and_calculate_jets(blob_data_list, params, regularization_strength=0.0):
     results["jets"]["east"] = []
     results["jets"]["west"] = []
 
-    def make_entry(blob, beta, low, up, meth):
+    def make_entry(blob, beta, low, up, meth, jet_side):
+        beta0 = float(params["beta"])
+
+        beta_e = float(beta) if jet_side == "east" else beta0
+        beta_w = float(beta) if jet_side == "west" else beta0
+
+        ok = _blob_intersects_at_beta(blob, params, mjd_obs, jet_side, beta_e, beta_w)
+
+        method = meth if ok else "plane_sky"
+
         return {
             "blob_id": blob["comp"],
-            "method": meth,
-            "fitted_beta": beta,
+            "method": method,
+            "fitted_beta": float(beta),
             "beta_lower_bound": low,
             "beta_upper_bound": up,
         }
 
     for blob in east_blobs:
-        results["jets"]["east"].append(make_entry(blob, beta_e, low_e, up_e, meth_e))
+        results["jets"]["east"].append(make_entry(blob, beta_e, low_e, up_e, meth_e, "east"))
 
     for blob in west_blobs:
-        results["jets"]["west"].append(make_entry(blob, beta_w, low_w, up_w, meth_w))
+        results["jets"]["west"].append(make_entry(blob, beta_w, low_w, up_w, meth_w, "west"))
 
     return results
 
 
 def _get_closest_geometric_point(blob_data, jet_side, fit_results, params):
     """
-    Given a fitted beta, find the exact point on the model curve closest to the observation
-    Returns the model age, radius, and PA at that point
+    Closest model point using polar misfit, restricted to the canonical-beta age window.
     """
-    beta_e = fit_results["fitted_betas"]["east"]
-    beta_w = fit_results["fitted_betas"]["west"]
 
-    x_obs, y_obs, sig_x_sq, sig_y_sq = _calculate_cartesian_obs_and_errors(blob_data)
+    if str(fit_results.get("jets", {}).get(jet_side, [{}])[0].get("method", "")).startswith("plane"):
+        return {
+            "model_pa": float(blob_data["pa_obs"]),
+            "model_rad": float(blob_data["rad_obs"]),
+            "model_age": np.nan,
+            "jd_ej": None,
+        }
 
-    # Generate a high resolution curve to find the precise nearest neighbor
-    age_curve = _age_curve_one_cycle(params, n=2000, min_age=0.0, frac_period=0.99)
+    beta_e = float(fit_results["fitted_betas"]["east"])
+    beta_w = float(fit_results["fitted_betas"]["west"])
+
+    age_curve = _age_curve_one_cycle(params)
     jd_ej_curve = (fit_results["mjd_obs"] + 2400000.5) - age_curve
 
-    mu_e_ra, mu_e_dec, mu_w_ra, mu_w_dec, pa_e, pa_w = ss433_phases(
-        jd_ej_curve, params, beta_east=beta_e, beta_west=beta_w
+    win = _canonical_age_window_mask(age_curve, jd_ej_curve, params, jet_side, blob_data)
+
+    rad_curve, pa_curve = _curve_rad_pa_deg(
+        age_curve, jd_ej_curve, params, jet_side, beta_e, beta_w
     )
 
-    if jet_side == "east":
-        rad_curve = (
-            np.sqrt(mu_e_ra**2 + mu_e_dec**2)
-            * config.C_PC_PER_DAY
-            * age_curve
-            / config.D_SS433_PC
-        ) * config.ARCSEC_PER_RADIAN
-        pa_curve = pa_e
+    if np.any(win):
+        mis = _polar_misfit(rad_curve[win], pa_curve[win], blob_data)
+        idx_local = int(np.argmin(mis))
+        idx = int(np.flatnonzero(win)[idx_local])
     else:
-        rad_curve = (
-            np.sqrt(mu_w_ra**2 + mu_w_dec**2)
-            * config.C_PC_PER_DAY
-            * age_curve
-            / config.D_SS433_PC
-        ) * config.ARCSEC_PER_RADIAN
-        pa_curve = pa_w
+        mis = _polar_misfit(rad_curve, pa_curve, blob_data)
+        idx = int(np.argmin(mis))
 
-    x_model = rad_curve * np.sin(np.deg2rad(pa_curve))
-    y_model = rad_curve * np.cos(np.deg2rad(pa_curve))
-
-    dist_sq = ((x_model - x_obs) ** 2 / sig_x_sq) + ((y_model - y_obs) ** 2 / sig_y_sq)
-    idx = int(np.argmin(dist_sq))
-
-    return {"model_pa": float(pa_curve[idx]), "model_rad": float(rad_curve[idx]), "model_age": float(age_curve[idx])}
+    return {
+        "model_pa": float(pa_curve[idx]),
+        "model_rad": float(rad_curve[idx]),
+        "model_age": float(age_curve[idx]),
+        "jd_ej": float(jd_ej_curve[idx]),
+    }

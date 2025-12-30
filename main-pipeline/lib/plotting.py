@@ -1,10 +1,16 @@
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 import config
-from lib.physics import ss433_phases, get_precession_limits, _get_closest_geometric_point
+from lib.physics import (
+    ss433_phases,
+    get_precession_limits,
+    _get_closest_geometric_point,
+    ss433_mu_from_config_ephemeris,
+    tau_core_to_knot_days_from_projected,
+    _age_curve_one_cycle,
+)
 
 def _plot_jet_trajectories_on_ax(ax, mjd_obs, params, mappable, r_max, betas=None):
     """
@@ -18,7 +24,7 @@ def _plot_jet_trajectories_on_ax(ax, mjd_obs, params, mappable, r_max, betas=Non
     beta_w = betas['west'] if betas else params['beta']
     
     # Generate time grid for the trajectory
-    t_travel = np.linspace(1.0, 325, 1000)
+    t_travel = _age_curve_one_cycle(params)
     jd_ej = jd_obs - t_travel
     
     # Calculate the kinematic positions for the entire time grid
@@ -66,7 +72,7 @@ def _plot_jet_error_region_on_ax(ax, jet_side, fit_results, params, mappable):
 
     mjd_obs = fit_results['mjd_obs']
     jd_obs = mjd_obs + 2400000.5
-    t_travel = np.linspace(0.0, 325, 1000)
+    t_travel = _age_curve_one_cycle(params)
     jd_ej = jd_obs - t_travel
     
     # Set beta bounds for the specific side being plotted
@@ -116,7 +122,10 @@ def plot_fit_and_calc_results(obs_id, blob_data_list, fit_results, params, pdf_o
     max_rad = max(all_rads) if all_rads else 1.0
     common_rmax = max(1.3, max_rad * 1.2)
     
-    mappable = plt.cm.ScalarMappable(cmap=plt.cm.rainbow, norm=mcolors.Normalize(vmin=1.0, vmax=225))
+    age_curve = _age_curve_one_cycle(params)
+    mappable = plt.cm.ScalarMappable(
+        cmap=plt.cm.rainbow,
+        norm=mcolors.Normalize(vmin=0, vmax=225))
     
     # Left Panel Default Model
     _plot_jet_trajectories_on_ax(ax1, mjd_obs, params, mappable, common_rmax)
@@ -142,14 +151,94 @@ def plot_fit_and_calc_results(obs_id, blob_data_list, fit_results, params, pdf_o
     plot_blobs(east_blobs, 'blue', "obs")
     plot_blobs(west_blobs, 'red', "obs")
 
+    def _add_tau_label(ax, th, rr, text, color_char):
+        r_text = 0.62 * float(rr)  # slightly higher than 0.55
+
+        p0 = ax.transData.transform((th, 0.0))
+        p1 = ax.transData.transform((th, float(rr)))
+        dx, dy = (p1 - p0)
+
+        ang = np.degrees(np.arctan2(dy, dx))
+
+        # Keep text upright
+        if ang > 90:
+            ang -= 180
+        elif ang < -90:
+            ang += 180
+        norm = np.hypot(dx, dy)
+        if norm < 1e-9:
+            ax.text(th, r_text, text, fontsize=7, color=color_char,
+                    ha="center", va="center", alpha=0.9)
+            return
+
+        nx, ny = -dy / norm, dx / norm  # perpendicular in screen coords
+
+        ax.annotate(
+            text,
+            xy=(th, r_text),
+            xytext=(8 * nx, 8 * ny),      # 8 px offset "above" the arrow
+            textcoords="offset pixels",
+            fontsize=7,
+            color=color_char,
+            ha="center",
+            va="center",
+            alpha=0.9,
+            rotation=ang,
+            rotation_mode="anchor",
+        )
+
     # Overlay connecting lines between observations and their model counterparts
     for jet_side, blob_list, color_char in [('east', east_blobs, 'b'), ('west', west_blobs, 'r')]:
         if not blob_list: continue
-        results_list = fit_results['jets'][jet_side]
-        
+        results_map = {e["blob_id"]: e for e in fit_results["jets"][jet_side]}
+
         for i, blob in enumerate(blob_list):
-            try: res_entry = results_list[i]
-            except IndexError: continue
+            res_entry = results_map.get(blob["comp"])
+            if res_entry is None:
+                continue
+
+            th = np.deg2rad(blob['pa_obs'])
+            rr = blob['rad_obs']
+
+            # draw arrow (core -> knot)
+            point = None
+            if res_entry["method"].startswith("fit"):
+                point = _get_closest_geometric_point(blob, jet_side, fit_results, params)
+
+            if point is not None:
+                th_end = np.deg2rad(point["model_pa"])
+                rr_end = float(point["model_rad"])
+            else:
+                th_end = th
+                rr_end = rr
+
+            ax2.annotate(
+                "",
+                xy=(th_end, rr_end),
+                xytext=(th_end, 0.0),
+                arrowprops=dict(arrowstyle="->", lw=0.8, color=color_char, alpha=0.6),
+                zorder=2,
+            )
+
+            # compute tau(core->knot) for label
+            tau_txt = None
+            try:
+                point_tau = _get_closest_geometric_point(blob, jet_side, fit_results, params)
+                jd_ej = point_tau.get("jd_ej", None)
+
+                if jd_ej is not None:
+                    mu_e, mu_w = ss433_mu_from_config_ephemeris(jd_ej)
+                    mu = mu_e if jet_side == "east" else mu_w
+
+                    rad_for_tau = float(point_tau.get("model_rad", rr))
+                    tau_days = tau_core_to_knot_days_from_projected(rad_for_tau, mu)
+                    tau_txt = f"τ={tau_days:.1f} d"
+            except Exception:
+                pass
+
+            if tau_txt:
+                _add_tau_label(ax2, th_end, rr_end, tau_txt, color_char)
+    
 
             if res_entry['method'].startswith('fit'):
                 # Draw a dashed line from the observation to the closest point on the model curve
@@ -166,12 +255,35 @@ def plot_fit_and_calc_results(obs_id, blob_data_list, fit_results, params, pdf_o
                         label = f"fit {jet_side} (beta={beta_val:.4f} +{err_pos:.4f}/-{err_neg:.4f})"
                     else:
                         label = f"fit {jet_side} (beta={beta_val:.4f})"
-                ax2.plot(np.deg2rad(point['model_pa']), point['model_rad'], 'x', c='w', ms=5, mec=color_char, zorder=4, label=label)
+                ax2.plot(
+                    np.deg2rad(point["model_pa"]), point["model_rad"],
+                    marker="X",
+                    markersize=5,
+                    markerfacecolor="white",
+                    markeredgecolor=color_char,
+                    markeredgewidth=1,
+                    linestyle="None",
+                    zorder=4,
+                    label=label,
+                )
             else:
-                # If no fit was found draw a dotted line to the origin as a fallback
-                ax2.plot([0, np.deg2rad(blob['pa_obs'])], [0, blob['rad_obs']], ls=':', c=color_char, alpha=0.5)
-                offset = 0.95 if jet_side == 'east' else 1.05
-                ax2.text(offset*np.deg2rad(blob['pa_obs']), offset*blob['rad_obs'], f" {blob['comp']}", color=color_char, fontsize=8)
+                # No intersection: assume plane of sky (mu=0) and canonical beta (for bookkeeping)
+                mu_plane = 0.0
+                tau_days = tau_core_to_knot_days_from_projected(float(rr), mu_plane)
+                _add_tau_label(ax2, th, rr, f"τ={tau_days:.1f} d", color_char)
+
+                ax2.plot(
+                    th, rr,
+                    marker="X",
+                    ms=5,
+                    mfc="w",
+                    mec=color_char,
+                    mew=1.0,
+                    zorder=4,
+                    label=None,
+                )
+
+                offset = 0.95 if jet_side == "east" else 1.05
 
     ax1.set_rmax(common_rmax); ax1.set_rmin(0)
     ax2.set_rmax(common_rmax); ax2.set_rmin(0)
