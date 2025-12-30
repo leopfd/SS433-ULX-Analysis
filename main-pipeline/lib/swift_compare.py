@@ -127,58 +127,61 @@ def plot_swift_comparison(tracker_df, ejection_df):
             print("[Swift Plot] Components present:", sorted(plot_df['component'].astype(str).unique()))
             return
 
-        suspect_obs_ids = []
-        if not g2_data_all.empty:
-            suspect_obs_ids = g2_data_all.sort_values('ejection_mjd').head(3)['obs_id'].tolist()
-        elif not g3_data_all.empty:
-            suspect_obs_ids = g3_data_all.sort_values('ejection_mjd').head(3)['obs_id'].tolist()
+        age_min = plot_df["ejection_mjd"].min()
+        age_max = plot_df["ejection_mjd"].max()
+        age_cmap = plt.cm.plasma
 
         def is_fit_method(series):
             return series.astype(str).str.lower().str.startswith('fit')
 
-        def plot_subset(data, method, is_suspect, color, marker, label_base):
+        def age_to_colors(values):
+            if values.empty:
+                return np.array([])
+            span = age_max - age_min
+            norm = (values - age_min) / span if span != 0 else np.zeros_like(values, dtype=float)
+            return age_cmap(norm)
+
+        def plot_subset(data, method, marker, labels_used):
             if data.empty:
                 return
 
             fit_mask = is_fit_method(data['method']) if 'method' in data.columns else pd.Series(False, index=data.index)
             mask = fit_mask if method == 'fit' else ~fit_mask
 
-            if is_suspect:
-                mask = mask & data['obs_id'].isin(suspect_obs_ids)
-                face = 'yellow'
-            else:
-                mask = mask & ~data['obs_id'].isin(suspect_obs_ids)
-                face = color
-
             subset = data[mask]
             if subset.empty:
                 return
 
-            lbl = f"{label_base} {'Suspect' if is_suspect else ''} {method.capitalize()} (x{int(config.HRC_SCALE_FACTOR)})"
-            if is_suspect and method != 'fit':
-                lbl = "_nolegend_"
+            colors = age_to_colors(subset['ejection_mjd'])
 
-            ax.errorbar(
-                x=subset['ejection_mjd'].values,
-                y=(subset['nominal'] * config.HRC_SCALE_FACTOR).values,
-                xerr=[np.abs(subset['ejection_mjd_err_neg'].values), np.abs(subset['ejection_mjd_err_pos'].values)],
-                yerr=[(subset['minus_err'] * config.HRC_SCALE_FACTOR).values, (subset['plus_err'] * config.HRC_SCALE_FACTOR).values],
-                fmt=marker, linestyle='',
-                markerfacecolor=face, markeredgecolor='black',
-                color=color, ecolor=color, capsize=3, alpha=0.9, zorder=10, label=lbl
-            )
+            for row, color in zip(subset.itertuples(), colors):
+                lbl = f"{method.capitalize()} (x{int(config.HRC_SCALE_FACTOR)})" if not labels_used.get(method) else "_nolegend_"
+                ax.errorbar(
+                    x=row.ejection_mjd,
+                    y=row.nominal * config.HRC_SCALE_FACTOR,
+                    xerr=[[abs(row.ejection_mjd_err_neg)], [abs(row.ejection_mjd_err_pos)]],
+                    yerr=[[row.minus_err * config.HRC_SCALE_FACTOR], [row.plus_err * config.HRC_SCALE_FACTOR]],
+                    fmt=marker, linestyle='',
+                    markerfacecolor=color, markeredgecolor='black',
+                    color=color, ecolor=color, capsize=3, alpha=0.9, zorder=10, label=lbl
+                )
+                labels_used[method] = True
 
-        plot_subset(g2_data_all, 'fit', False, 'deepskyblue', 'o', "East Jet")
-        plot_subset(g2_data_all, 'calc', False, 'deepskyblue', '<', "East Jet")
-        plot_subset(g2_data_all, 'fit', True,  'deepskyblue', 'o', "East Jet")
-        plot_subset(g2_data_all, 'calc', True, 'deepskyblue', '<', "East Jet")
-        plot_subset(g3_data_all, 'fit', False, 'lightcoral', 'o', "West Jet")
-        plot_subset(g3_data_all, 'calc', False, 'lightcoral', '<', "West Jet")
+        label_tracker = {"fit": False, "calc": False}
+        plot_subset(g2_data_all, 'fit', 'o', label_tracker)
+        plot_subset(g2_data_all, 'calc', '<', label_tracker)
+        plot_subset(g3_data_all, 'fit', 'o', label_tracker)
+        plot_subset(g3_data_all, 'calc', '<', label_tracker)
 
         ax.set_xlabel("MJD (days)")
         ax.set_ylabel("Count Rate (cts/s)")
         ax.set_title("Swift Count Rates vs. HRC Count Rates at Component Ejection Time")
         ax.grid(True, linestyle='--', alpha=0.6)
+
+        sm = plt.cm.ScalarMappable(cmap=age_cmap, norm=plt.Normalize(vmin=age_min, vmax=age_max))
+        sm.set_array([])
+        cbar = plt.colorbar(sm, ax=ax)
+        cbar.set_label("Ejection MJD")
 
         handles, labels = ax.get_legend_handles_labels()
         by_label = dict(zip(labels, handles))
@@ -204,17 +207,24 @@ def plot_swift_comparison(tracker_df, ejection_df):
             g2_data_all = plot_df_lt[east_mask].copy()
             g3_data_all = plot_df_lt[west_mask].copy()
 
-            plot_subset(g2_data_all, 'fit', False, 'deepskyblue', 'o', "East Jet")
-            plot_subset(g2_data_all, 'calc', False, 'deepskyblue', '<', "East Jet")
-            plot_subset(g2_data_all, 'fit', True,  'deepskyblue', 'o', "East Jet")
-            plot_subset(g2_data_all, 'calc', True, 'deepskyblue', '<', "East Jet")
-            plot_subset(g3_data_all, 'fit', False, 'lightcoral', 'o', "West Jet")
-            plot_subset(g3_data_all, 'calc', False, 'lightcoral', '<', "West Jet")
+            age_min = plot_df_lt["ejection_mjd"].min()
+            age_max = plot_df_lt["ejection_mjd"].max()
+
+            label_tracker = {"fit": False, "calc": False}
+            plot_subset(g2_data_all, 'fit', 'o', label_tracker)
+            plot_subset(g2_data_all, 'calc', '<', label_tracker)
+            plot_subset(g3_data_all, 'fit', 'o', label_tracker)
+            plot_subset(g3_data_all, 'calc', '<', label_tracker)
 
             ax.set_xlabel("MJD (days)")
             ax.set_ylabel("Count Rate (cts/s)")
             ax.set_title("Swift Count Rates vs. HRC Count Rates (Age − Light Travel Time)")
             ax.grid(True, linestyle='--', alpha=0.6)
+
+            sm = plt.cm.ScalarMappable(cmap=age_cmap, norm=plt.Normalize(vmin=age_min, vmax=age_max))
+            sm.set_array([])
+            cbar = plt.colorbar(sm, ax=ax)
+            cbar.set_label("Ejection MJD (Light-travel Corrected)")
 
             handles, labels = ax.get_legend_handles_labels()
             by_label = dict(zip(labels, handles))

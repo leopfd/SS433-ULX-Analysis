@@ -216,21 +216,40 @@ def ss433_phases(jd_obs, params, beta_east=None, beta_west=None):
     return mu_east_ra, mu_east_dec, mu_west_ra, mu_west_dec, pa_east, pa_west
 
 
-def ss433_mu_from_config_ephemeris(jd):
+def ss433_mu_at_jd(jd, params=None):
     """
-    Returns (mu_east, mu_west) where mu = cos(theta_LOS), using config.EPHEMERIS.
+    Returns (mu_east, mu_west) where mu = cos(theta_LOS) at a given JD using the
+    supplied ephemeris parameters. Includes nutation/orbital terms when present
+    so the light travel correction reflects the same geometry as the fit.
     """
-    p = config.EPHEMERIS
+    p = params if params is not None else config.EPHEMERIS
 
     inc = p["inclination"]
     theta = p["theta"]
 
     prec_phase = ((jd - p["jd0_precession"]) / p["precession_period"]) % 1.0
-    phi = -2.0 * np.pi * prec_phase
+    phi = p["phi0"] - 2.0 * np.pi * prec_phase if p.get("model_type") == "full" else -2.0 * np.pi * prec_phase
 
-    mu_east = np.sin(theta) * np.sin(inc) * np.cos(phi) + np.cos(theta) * np.cos(inc)
+    effective_theta = theta
+    if p.get("model_type") == "full":
+        nut_phase = ((jd - p["jd0_nut"]) / p["nut_period"]) % 1.0
+        effective_theta += p["nut_ampl"] * np.cos(2 * np.pi * nut_phase)
+
+    sin_theta, cos_theta = np.sin(effective_theta), np.cos(effective_theta)
+    sin_inc, cos_inc = np.sin(inc), np.cos(inc)
+    cos_phi = np.cos(phi)
+
+    mu_east = sin_theta * sin_inc * cos_phi + cos_theta * cos_inc
+    mu_east = float(np.clip(mu_east, -1.0, 1.0))
     mu_west = -mu_east
     return mu_east, mu_west
+
+
+def ss433_mu_from_config_ephemeris(jd):
+    """
+    Backwards-compatible wrapper that uses the configured ephemeris.
+    """
+    return ss433_mu_at_jd(jd, config.EPHEMERIS)
 
 
 def tau_core_to_knot_days_from_projected(rad_arcsec, mu):
@@ -437,7 +456,12 @@ def _get_closest_geometric_point(blob_data, jet_side, fit_results, params):
     Closest model point using polar misfit, restricted to the canonical-beta age window.
     """
 
-    if str(fit_results.get("jets", {}).get(jet_side, [{}])[0].get("method", "")).startswith("plane"):
+    jet_entries = fit_results.get("jets", {}).get(jet_side, [])
+    res_entry = next((e for e in jet_entries if e.get("blob_id") == blob_data.get("comp")), None)
+    if res_entry is None and jet_entries:
+        res_entry = jet_entries[0]
+
+    if res_entry and str(res_entry.get("method", "")).startswith("plane"):
         return {
             "model_pa": float(blob_data["pa_obs"]),
             "model_rad": float(blob_data["rad_obs"]),

@@ -5,7 +5,7 @@ import config
 from lib.physics import (
     fit_and_calculate_jets,
     _get_closest_geometric_point,
-    ss433_mu_from_config_ephemeris,
+    ss433_mu_at_jd,
     tau_core_to_knot_days_from_projected,
 )
 from lib.plotting import plot_fit_and_calc_results
@@ -106,13 +106,15 @@ def run_kinematic_analysis(input_df):
                     # Calculate the theoretical travel time based on the geometric model
                     fitted_point = _get_closest_geometric_point(blob, jet_side, analysis_results, ss433_params)
                     row['travel_time_days'] = fitted_point.get('model_age')
-                    rad_obs = blob.get("rad_obs", np.nan)
                     jd_ej = fitted_point.get("jd_ej", np.nan)
+                    rad_model = fitted_point.get("model_rad", np.nan)
+                    rad_obs = blob.get("rad_obs", np.nan)
+                    rad_for_tau = rad_model if pd.notna(rad_model) else rad_obs
 
-                    if pd.notna(rad_obs) and pd.notna(jd_ej):
-                        mu_e, mu_w = ss433_mu_from_config_ephemeris(jd_ej)
+                    if pd.notna(rad_for_tau) and pd.notna(jd_ej):
+                        mu_e, mu_w = ss433_mu_at_jd(jd_ej, ss433_params)
                         mu = mu_e if jet_side == "east" else mu_w
-                        row["light_delay_days"] = tau_core_to_knot_days_from_projected(rad_obs, mu)
+                        row["light_delay_days"] = tau_core_to_knot_days_from_projected(rad_for_tau, mu)
                     
                     all_results_data.append(row)
         else:
