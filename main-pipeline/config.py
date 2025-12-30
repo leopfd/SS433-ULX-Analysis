@@ -39,7 +39,7 @@ PLOT_OUTPUT_PDF = ""
 
 # Swift and External Data configuration
 SWIFT_FILE = "/Users/leodrake/Documents/ss433/swift-hrc-data.txt"
-HRC_SCALE_FACTOR = 15.0
+HRC_SCALE_FACTOR = 50.0
 
 # Physics constants and unit conversions
 CENTER_PIXEL = None 

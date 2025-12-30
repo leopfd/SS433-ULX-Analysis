@@ -32,7 +32,6 @@ def run():
     # Uses the tracked component trajectories to model jet kinematics and ejection dates
     print("\n=== stage 3: kinematic fitting ===\n")
     ejection_df = model_kinematics.run_kinematic_analysis(tracker_df)
-    print(ejection_df)
     
     if ejection_df is None or ejection_df.empty:
         print("critical error: stage 3 returned no results. aborting.")
@@ -46,7 +45,7 @@ def run():
     end_time = time.time()
     total_time = (end_time - start_time) / 60
     print(f"\npipeline finished in {total_time:.2f} minutes.")
-    print(f"\n=== process complete ===")
+    print(f"\n=== process complete ===\n")
 
 if __name__ == "__main__":
     from lib.arguments import get_pipeline_args
