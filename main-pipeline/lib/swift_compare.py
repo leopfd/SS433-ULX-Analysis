@@ -27,15 +27,16 @@ def plot_swift_comparison(tracker_df, ejection_df):
         if 'travel_time_days' in ejection_df.columns:
             ejection_df = ejection_df.copy()
             ejection_df['ejection_mjd'] = ejection_df['mjd'] - ejection_df['travel_time_days']
-            if "light_delay_days" in ejection_df.columns:
-                ejection_df = ejection_df.copy()
-                ejection_df["ejection_mjd_lt"] = (
-                    ejection_df["mjd"]
-                    - (ejection_df["travel_time_days"] - ejection_df["light_delay_days"])
-                )
         else:
             print("[Swift Plot] Error: 'travel_time_days' missing from ejection dataframe.")
             return
+
+    # Core emission time for reflected light: observed MJD minus core->knot light-travel time
+    if "light_delay_days" in ejection_df.columns:
+        ejection_df = ejection_df.copy()
+        ejection_df["light_delay_days_err"] = ejection_df.get("light_delay_days_err", np.nan)
+        ejection_df["ejection_mjd_lt"] = ejection_df["mjd"] - ejection_df["light_delay_days"]
+        ejection_df["ejection_mjd_lt_err"] = ejection_df["light_delay_days_err"]
 
     # Calculate errors if not present
     if 'ejection_mjd_err_pos' not in ejection_df.columns or 'ejection_mjd_err_neg' not in ejection_df.columns:
@@ -53,10 +54,20 @@ def plot_swift_comparison(tracker_df, ejection_df):
             ejection_df['ejection_mjd_err_neg'] = 0.0
 
     # Merge Dataframes matching observation IDs and component names
-    hrc_cols = ['obs_id', 'component', 'nominal', 'minus_err', 'plus_err']
+    hrc_cols = ['obs_id', 'component', 'mjd', 'nominal', 'minus_err', 'plus_err']
     hrc_data = tracker_df[[c for c in hrc_cols if c in tracker_df.columns]].copy()
 
-    ejection_cols = ['obs_id', 'component_name', 'ejection_mjd', 'ejection_mjd_lt', 'method', 'ejection_mjd_err_pos', 'ejection_mjd_err_neg']
+    ejection_cols = [
+        'obs_id',
+        'component_name',
+        'ejection_mjd',
+        'ejection_mjd_lt',
+        'ejection_mjd_lt_err',
+        'method',
+        'ejection_mjd_err_pos',
+        'ejection_mjd_err_neg',
+        'light_delay_days_err',
+    ]
     if 'component_name' not in ejection_df.columns and 'component' in ejection_df.columns:
         ejection_df = ejection_df.copy()
         ejection_df['component_name'] = ejection_df['component']
@@ -73,6 +84,16 @@ def plot_swift_comparison(tracker_df, ejection_df):
     if plot_df.empty:
         print("[Swift Plot] Warning: Merge resulted in empty dataframe.")
         return
+
+    if 'method' in plot_df.columns:
+        plot_df = plot_df.copy()
+        plot_df['method_norm'] = plot_df['method'].astype(str).str.strip().str.lower()
+        # Collapse any non-fit into calc for plotting so plane/other fall into calc.
+        plot_df['plot_method'] = np.where(
+            plot_df['method_norm'].str.startswith('fit'),
+            'fit',
+            'calc'
+        )
 
     # Load Swift Data using the original text parsing logic
     swift_list = []
@@ -103,7 +124,20 @@ def plot_swift_comparison(tracker_df, ejection_df):
 
     out_file = os.path.join(config.DIR_JET_PLOTS, f'swift-comparison-{config.FILE_ID}.pdf')
 
-    with PdfPages(out_file) as pdf:
+    style_ctx = {
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.grid": True,
+        "grid.linestyle": "--",
+        "grid.alpha": 0.35,
+        "axes.titlesize": 16,
+        "axes.labelsize": 14,
+        "xtick.labelsize": 12,
+        "ytick.labelsize": 12,
+        "legend.fontsize": 11,
+    }
+
+    with plt.style.context(style_ctx), PdfPages(out_file) as pdf:
 
         # original ejection ages
         fig, ax = plt.subplots(figsize=(15, 7))
@@ -127,61 +161,119 @@ def plot_swift_comparison(tracker_df, ejection_df):
             print("[Swift Plot] Components present:", sorted(plot_df['component'].astype(str).unique()))
             return
 
-        age_min = plot_df["ejection_mjd"].min()
-        age_max = plot_df["ejection_mjd"].max()
-        age_cmap = plt.cm.plasma
-
-        def is_fit_method(series):
-            return series.astype(str).str.lower().str.startswith('fit')
-
-        def age_to_colors(values):
+        obs_min = plot_df["mjd"].min() if "mjd" in plot_df.columns else plot_df["ejection_mjd"].min()
+        obs_max = plot_df["mjd"].max() if "mjd" in plot_df.columns else plot_df["ejection_mjd"].max()
+        def age_to_colors(values, vmin, vmax, cmap):
             if values.empty:
                 return np.array([])
-            span = age_max - age_min
-            norm = (values - age_min) / span if span != 0 else np.zeros_like(values, dtype=float)
-            return age_cmap(norm)
+            span = vmax - vmin
+            norm = (values - vmin) / span if span != 0 else np.zeros_like(values, dtype=float)
+            return cmap(np.clip(norm, 0, 1))
 
-        def plot_subset(data, method, marker, labels_used):
+        # Shared colormap for both panels
+        cmap_common = plt.cm.rainbow_r
+
+        def is_fit_method(series):
+            return series.astype(str).str.startswith('fit')
+
+        def is_calc_method(series):
+            s = series.astype(str)
+            return s.str.startswith('calc') | (~is_fit_method(series))
+
+        def plot_subset(
+            data,
+            method,
+            marker,
+            labels_used,
+            x_field="ejection_mjd",
+            xerr_lower_col="ejection_mjd_err_neg",
+            xerr_upper_col="ejection_mjd_err_pos",
+            xerr_sym_col=None,
+            color_min=None,
+            color_max=None,
+            color_cmap=None,
+            color_field=None,
+            marker_size=7,
+        ):
             if data.empty:
                 return
 
-            fit_mask = is_fit_method(data['method']) if 'method' in data.columns else pd.Series(False, index=data.index)
-            mask = fit_mask if method == 'fit' else ~fit_mask
+            method_col = (
+                'plot_method'
+                if 'plot_method' in data.columns
+                else 'method_norm'
+                if 'method_norm' in data.columns
+                else ('method' if 'method' in data.columns else None)
+            )
+
+            if method_col is not None:
+                fit_mask = is_fit_method(data[method_col])
+                calc_mask = is_calc_method(data[method_col])
+            else:
+                fit_mask = pd.Series(False, index=data.index)
+                calc_mask = ~fit_mask
+
+            if method == 'fit':
+                mask = fit_mask
+            else:
+                mask = calc_mask
 
             subset = data[mask]
             if subset.empty:
                 return
 
-            colors = age_to_colors(subset['ejection_mjd'])
+            cf = color_field if color_field is not None else x_field
+            if cf not in subset.columns:
+                cf = x_field
+            color_min = color_min if color_min is not None else subset[cf].min()
+            color_max = color_max if color_max is not None else subset[cf].max()
+            cmap = color_cmap if color_cmap is not None else cmap_common
+            colors = age_to_colors(subset[cf], color_min, color_max, cmap)
 
             for row, color in zip(subset.itertuples(), colors):
-                lbl = f"{method.capitalize()} (x{int(config.HRC_SCALE_FACTOR)})" if not labels_used.get(method) else "_nolegend_"
+                if method == "calc":
+                    lbl = "_nolegend_"
+                else:
+                    lbl = f"Jet knot (x{int(config.HRC_SCALE_FACTOR)})" if not labels_used.get(method) else "_nolegend_"
+                x_val = getattr(row, x_field)
+                if xerr_sym_col:
+                    sym = getattr(row, xerr_sym_col, np.nan)
+                    xerr_val = [[abs(sym)], [abs(sym)]]
+                else:
+                    lower = getattr(row, xerr_lower_col, np.nan)
+                    upper = getattr(row, xerr_upper_col, np.nan)
+                    xerr_val = [[abs(lower)], [abs(upper)]]
                 ax.errorbar(
-                    x=row.ejection_mjd,
+                    x=x_val,
                     y=row.nominal * config.HRC_SCALE_FACTOR,
-                    xerr=[[abs(row.ejection_mjd_err_neg)], [abs(row.ejection_mjd_err_pos)]],
+                    xerr=xerr_val,
                     yerr=[[row.minus_err * config.HRC_SCALE_FACTOR], [row.plus_err * config.HRC_SCALE_FACTOR]],
                     fmt=marker, linestyle='',
+                    markersize=marker_size,
                     markerfacecolor=color, markeredgecolor='black',
-                    color=color, ecolor=color, capsize=3, alpha=0.9, zorder=10, label=lbl
+                    color=color, ecolor=color, capsize=3, alpha=0.95, zorder=12, label=lbl
                 )
                 labels_used[method] = True
 
         label_tracker = {"fit": False, "calc": False}
-        plot_subset(g2_data_all, 'fit', 'o', label_tracker)
-        plot_subset(g2_data_all, 'calc', '<', label_tracker)
-        plot_subset(g3_data_all, 'fit', 'o', label_tracker)
-        plot_subset(g3_data_all, 'calc', '<', label_tracker)
+        plot_subset(g2_data_all, 'fit', 'o', label_tracker, marker_size=8,
+                    color_field="mjd", color_min=obs_min, color_max=obs_max)
+        plot_subset(g2_data_all, 'calc', 'o', label_tracker, marker_size=9,
+                    color_field="mjd", color_min=obs_min, color_max=obs_max)
+        plot_subset(g3_data_all, 'fit', 'o', label_tracker, marker_size=8,
+                    color_field="mjd", color_min=obs_min, color_max=obs_max)
+        plot_subset(g3_data_all, 'calc', 'o', label_tracker, marker_size=9,
+                    color_field="mjd", color_min=obs_min, color_max=obs_max)
 
         ax.set_xlabel("MJD (days)")
         ax.set_ylabel("Count Rate (cts/s)")
-        ax.set_title("Swift Count Rates vs. HRC Count Rates at Component Ejection Time")
+        ax.set_title("Swift vs. HRC Count Rates — Jet Knot Ejection Time")
         ax.grid(True, linestyle='--', alpha=0.6)
 
-        sm = plt.cm.ScalarMappable(cmap=age_cmap, norm=plt.Normalize(vmin=age_min, vmax=age_max))
+        sm = plt.cm.ScalarMappable(cmap=cmap_common, norm=plt.Normalize(vmin=obs_min, vmax=obs_max))
         sm.set_array([])
         cbar = plt.colorbar(sm, ax=ax)
-        cbar.set_label("Ejection MJD")
+        cbar.set_label("Observation MJD")
 
         handles, labels = ax.get_legend_handles_labels()
         by_label = dict(zip(labels, handles))
@@ -191,8 +283,8 @@ def plot_swift_comparison(tracker_df, ejection_df):
         pdf.savefig(fig)
         plt.close(fig)
 
-        # light-travel corrected ages
-        if "ejection_mjd_lt" in plot_df.columns:
+        # core emission times (obs - tau_core->knot)
+        if "ejection_mjd_lt" in plot_df.columns and plot_df["ejection_mjd_lt"].notna().any():
 
             fig, ax = plt.subplots(figsize=(15, 7))
 
@@ -207,24 +299,42 @@ def plot_swift_comparison(tracker_df, ejection_df):
             g2_data_all = plot_df_lt[east_mask].copy()
             g3_data_all = plot_df_lt[west_mask].copy()
 
-            age_min = plot_df_lt["ejection_mjd"].min()
-            age_max = plot_df_lt["ejection_mjd"].max()
+            obs_min = plot_df_lt["mjd"].min() if "mjd" in plot_df_lt.columns else plot_df_lt["ejection_mjd"].min()
+            obs_max = plot_df_lt["mjd"].max() if "mjd" in plot_df_lt.columns else plot_df_lt["ejection_mjd"].max()
+            # Core-emission (t_obs - tau): shared colormap
+            age_cmap_core = cmap_common
 
             label_tracker = {"fit": False, "calc": False}
-            plot_subset(g2_data_all, 'fit', 'o', label_tracker)
-            plot_subset(g2_data_all, 'calc', '<', label_tracker)
-            plot_subset(g3_data_all, 'fit', 'o', label_tracker)
-            plot_subset(g3_data_all, 'calc', '<', label_tracker)
+            plot_subset(
+                g2_data_all, 'fit', 'o', label_tracker,
+                x_field="ejection_mjd_lt", xerr_sym_col="ejection_mjd_lt_err",
+                color_field="mjd", color_min=obs_min, color_max=obs_max, color_cmap=age_cmap_core
+            )
+            plot_subset(
+                g2_data_all, 'calc', 'o', label_tracker,
+                x_field="ejection_mjd_lt", xerr_sym_col="ejection_mjd_lt_err",
+                color_field="mjd", color_min=obs_min, color_max=obs_max, color_cmap=age_cmap_core
+            )
+            plot_subset(
+                g3_data_all, 'fit', 'o', label_tracker,
+                x_field="ejection_mjd_lt", xerr_sym_col="ejection_mjd_lt_err",
+                color_field="mjd", color_min=obs_min, color_max=obs_max, color_cmap=age_cmap_core
+            )
+            plot_subset(
+                g3_data_all, 'calc', 'o', label_tracker,
+                x_field="ejection_mjd_lt", xerr_sym_col="ejection_mjd_lt_err",
+                color_field="mjd", color_min=obs_min, color_max=obs_max, color_cmap=age_cmap_core
+            )
 
             ax.set_xlabel("MJD (days)")
             ax.set_ylabel("Count Rate (cts/s)")
-            ax.set_title("Swift Count Rates vs. HRC Count Rates (Age − Light Travel Time)")
+            ax.set_title("Swift vs. HRC Count Rates — Reflected Radiation Emission Time")
             ax.grid(True, linestyle='--', alpha=0.6)
 
-            sm = plt.cm.ScalarMappable(cmap=age_cmap, norm=plt.Normalize(vmin=age_min, vmax=age_max))
+            sm = plt.cm.ScalarMappable(cmap=age_cmap_core, norm=plt.Normalize(vmin=obs_min, vmax=obs_max))
             sm.set_array([])
             cbar = plt.colorbar(sm, ax=ax)
-            cbar.set_label("Ejection MJD (Light-travel Corrected)")
+            cbar.set_label("Observation MJD")
 
             handles, labels = ax.get_legend_handles_labels()
             by_label = dict(zip(labels, handles))
