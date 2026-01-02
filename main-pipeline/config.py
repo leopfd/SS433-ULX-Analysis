@@ -85,8 +85,8 @@ EPHEM_SIMPLE = {
 
 # Full ephemeris model including nutation and orbital parameters
 EPHEM_FULL = {
-    'model_type': 'full',
     **EPHEM_SIMPLE,
+    'model_type': 'full',  # override simple
     'phi0': np.radians(-49.0), 
     'jd0_nut': 2400000.5 + 59797.68,
     'jd0_nut_err': 0.09,

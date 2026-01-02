@@ -240,7 +240,12 @@ def ss433_mu_at_jd(jd, params=None):
     cos_phi = np.cos(phi)
 
     mu_east = sin_theta * sin_inc * cos_phi + cos_theta * cos_inc
-    mu_east = float(np.clip(mu_east, -1.0, 1.0))
+    mu_east = np.clip(mu_east, -1.0, 1.0)
+
+    # Preserve arrays for vectorized calls; cast scalars for legacy callers.
+    if np.ndim(mu_east) == 0:
+        mu_east = float(mu_east)
+
     mu_west = -mu_east
     return mu_east, mu_west
 

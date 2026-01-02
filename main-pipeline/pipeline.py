@@ -16,8 +16,8 @@ def run():
 
     # Stage 1 Image Fitting
     # Processes raw observation files to fit spatial models and extract component centroids
-    print("\n=== stage 1: fitting images ===\n")
-    fit_images.run_pipeline()
+    #print("\n=== stage 1: fitting images ===\n")
+    #fit_images.run_pipeline()
     
     # Stage 2 Component Tracking
     # Aggregates individual fit results to track component movement over time
