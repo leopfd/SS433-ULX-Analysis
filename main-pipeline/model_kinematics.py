@@ -115,6 +115,22 @@ def run_kinematic_analysis(input_df):
                         mu_e, mu_w = ss433_mu_at_jd(jd_ej, ss433_params)
                         mu = mu_e if jet_side == "east" else mu_w
                         row["light_delay_days"] = tau_core_to_knot_days_from_projected(rad_for_tau, mu)
+                        # Approximate tau uncertainty from projected-radius error (mu uncertainty not tracked).
+                        rad_err_candidates = [
+                            blob.get("rad_err_U", np.nan),
+                            abs(blob.get("rad_err_L", np.nan)),
+                        ]
+                        rad_err = np.nan
+                        for candidate in rad_err_candidates:
+                            if pd.notna(candidate) and candidate > 0:
+                                rad_err = candidate if pd.isna(rad_err) else min(rad_err, candidate)
+                        if pd.notna(rad_err) and rad_for_tau > 0:
+                            frac_rad_err = rad_err / rad_for_tau
+                            row["light_delay_days_err"] = row["light_delay_days"] * frac_rad_err
+                        else:
+                            row["light_delay_days_err"] = np.nan
+                    else:
+                        row["light_delay_days_err"] = np.nan
                     
                     all_results_data.append(row)
         else:
