@@ -1,5 +1,7 @@
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+from matplotlib.lines import Line2D
+from matplotlib.ticker import FixedLocator
 import numpy as np
 import pandas as pd
 import config
@@ -106,12 +108,39 @@ def _plot_jet_error_region_on_ax(ax, jet_side, fit_results, params, mappable):
 
 def plot_fit_and_calc_results(obs_id, blob_data_list, fit_results, params, pdf_object=None):
     """
-    Main plotting function that creates a side by side comparison
-    Left panel shows the default model
-    Right panel shows the best fit model with uncertainty regions and observed data
+    Main plotting function for jet kinematics
+    Shows the best fit model with uncertainty regions and observed data
     """
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 9), subplot_kw={'projection': 'polar'})
-    fig.suptitle(f"observation id: {obs_id}", fontsize=20, y=0.97)
+    fig, ax_fit = plt.subplots(1, 1, figsize=(12, 9), subplot_kw={'projection': 'polar'})
+    betas = fit_results.get('fitted_betas', {})
+
+    def side_has_fit(side):
+        entries = fit_results.get('jets', {}).get(side, [])
+        for e in entries:
+            if str(e.get('method', '')).startswith('fit') and not pd.isna(e.get('fitted_beta')):
+                return True
+        return False
+
+    def get_beta(side):
+        val = betas.get(side) if betas else None
+        if val is None:
+            entries = fit_results.get('jets', {}).get(side, [])
+            for e in entries:
+                if str(e.get('method', '')).startswith('fit') and not pd.isna(e.get('fitted_beta')):
+                    return e.get('fitted_beta')
+        return val
+
+    beta_e = get_beta('east') if side_has_fit('east') else None
+    beta_w = get_beta('west') if side_has_fit('west') else None
+    beta_e_str = f"{beta_e:.4f}" if beta_e is not None else "n/a"
+    beta_w_str = f"{beta_w:.4f}" if beta_w is not None else "n/a"
+    beta_parts = [f"MJD={fit_results['mjd_obs']:.1f}"]
+    if beta_e is not None:
+        beta_parts.append(f"β$_\\leftarrow$={beta_e_str}")
+    if beta_w is not None:
+        beta_parts.append(f"β$_\\rightarrow$={beta_w_str}")
+    beta_suffix = ", ".join(beta_parts)
+    fig.suptitle(f"Jet Model Fit ObsID {obs_id} ({beta_suffix})", fontsize=20, y=0.97)
     mjd_obs = fit_results['mjd_obs']
 
     east_blobs = [b for b in blob_data_list if b['comp'].startswith('east')]
@@ -122,37 +151,51 @@ def plot_fit_and_calc_results(obs_id, blob_data_list, fit_results, params, pdf_o
     max_rad = max(all_rads) if all_rads else 1.0
     common_rmax = max(1.3, max_rad * 1.2)
     
-    age_curve = _age_curve_one_cycle(params)
     mappable = plt.cm.ScalarMappable(
         cmap=plt.cm.rainbow,
         norm=mcolors.Normalize(vmin=0, vmax=225))
     
-    # Left Panel Default Model
-    _plot_jet_trajectories_on_ax(ax1, mjd_obs, params, mappable, common_rmax)
-    ax1.set_title(f"model at mjd {mjd_obs:.1f}\n(default beta = {params['beta']:.4f})", pad=20, fontsize=14)
+    # Fit Results Panel
+    _plot_jet_trajectories_on_ax(ax_fit, mjd_obs, params, mappable, common_rmax, betas=fit_results.get('fitted_betas'))
+    _plot_jet_error_region_on_ax(ax_fit, 'east', fit_results, params, mappable)
+    _plot_jet_error_region_on_ax(ax_fit, 'west', fit_results, params, mappable)
+    ax_fit.set_ylabel(None)
+    ax_fit.set_thetagrids(range(0, 360, 45), labels=[f"{deg}°" for deg in range(0, 360, 45)], fontsize=14)
+    ax_fit.set_rlabel_position(135)
+    ax_fit.tick_params(labelsize=14)
+    # Give only 3-digit degree labels a little extra radial offset to avoid clipping
+    for lbl in ax_fit.xaxis.get_majorticklabels():
+        text = lbl.get_text().replace("°", "").strip()
+        try:
+            angle_val = float(text)
+        except ValueError:
+            continue
+        if abs(angle_val) >= 100:
+            x_pos, y_pos = lbl.get_position()
+            lbl.set_position((x_pos, y_pos - 0.03))
+    label_theta = np.deg2rad(145.5)  # place label along a consistent angle
+    label_r = 0.92 * common_rmax  # push start of text outward so the whole phrase stays inside the field
+    ax_fit.text(
+        label_theta, label_r, "Projected separation (arcsec)",
+        rotation=48.5, rotation_mode="anchor",
+        ha="left", va="center", color="#000", fontsize=14,
+        zorder=5,
+    )
 
-    # Right Panel Fit Results
-    _plot_jet_trajectories_on_ax(ax2, mjd_obs, params, mappable, common_rmax, betas=fit_results.get('fitted_betas'))
-    _plot_jet_error_region_on_ax(ax2, 'east', fit_results, params, mappable)
-    _plot_jet_error_region_on_ax(ax2, 'west', fit_results, params, mappable)
-    ax2.set_title(f"fit/calculation results at mjd {mjd_obs:.1f}", pad=20, fontsize=14)
-
-    def plot_blobs(blobs, color, label_prefix):
+    def plot_blobs(blobs, color):
         for i, b in enumerate(blobs):
-            label = f"{label_prefix} {b['comp']}" if i == 0 else None
-            for ax in [ax1, ax2]:
-                ax.errorbar(
-                    np.deg2rad(b['pa_obs']), b['rad_obs'], 
-                    yerr=[[abs(b['rad_err_L'])], [abs(b['rad_err_U'])]], 
-                    xerr=[[np.deg2rad(abs(b['pa_err_L']))], [np.deg2rad(abs(b['pa_err_U']))]], 
-                    fmt='o', color=color, ecolor='gray', capsize=3, zorder=3, label=label
-                )
+            ax_fit.errorbar(
+                np.deg2rad(b['pa_obs']), b['rad_obs'], 
+                yerr=[[abs(b['rad_err_L'])], [abs(b['rad_err_U'])]], 
+                xerr=[[np.deg2rad(abs(b['pa_err_L']))], [np.deg2rad(abs(b['pa_err_U']))]], 
+                fmt='o', color=color, ecolor='gray', capsize=3, zorder=3, label=None
+            )
 
-    plot_blobs(east_blobs, 'blue', "obs")
-    plot_blobs(west_blobs, 'red', "obs")
+    plot_blobs(east_blobs, 'blue')
+    plot_blobs(west_blobs, 'red')
 
     def _add_tau_label(ax, th, rr, text, color_char):
-        r_text = 0.62 * float(rr)  # slightly higher than 0.55
+        r_text = 0.58 * float(rr)  # slightly closer to center for readability
 
         p0 = ax.transData.transform((th, 0.0))
         p1 = ax.transData.transform((th, float(rr)))
@@ -167,7 +210,7 @@ def plot_fit_and_calc_results(obs_id, blob_data_list, fit_results, params, pdf_o
             ang += 180
         norm = np.hypot(dx, dy)
         if norm < 1e-9:
-            ax.text(th, r_text, text, fontsize=7, color=color_char,
+            ax.text(th, r_text, text, fontsize=10, color=color_char,
                     ha="center", va="center", alpha=0.9)
             return
 
@@ -178,7 +221,7 @@ def plot_fit_and_calc_results(obs_id, blob_data_list, fit_results, params, pdf_o
             xy=(th, r_text),
             xytext=(8 * nx, 8 * ny),      # 8 px offset "above" the arrow
             textcoords="offset pixels",
-            fontsize=7,
+            fontsize=10,
             color=color_char,
             ha="center",
             va="center",
@@ -212,7 +255,7 @@ def plot_fit_and_calc_results(obs_id, blob_data_list, fit_results, params, pdf_o
                 th_end = th
                 rr_end = rr
 
-            ax2.annotate(
+            ax_fit.annotate(
                 "",
                 xy=(th_end, rr_end),
                 xytext=(th_end, 0.0),
@@ -237,25 +280,16 @@ def plot_fit_and_calc_results(obs_id, blob_data_list, fit_results, params, pdf_o
                 pass
 
             if tau_txt:
-                _add_tau_label(ax2, th_end, rr_end, tau_txt, color_char)
+                _add_tau_label(ax_fit, th_end, rr_end, tau_txt, color_char)
     
 
             if res_entry['method'].startswith('fit'):
                 # Draw a dashed line from the observation to the closest point on the model curve
                 point = _get_closest_geometric_point(blob, jet_side, fit_results, params)
-                ax2.plot([np.deg2rad(blob['pa_obs']), np.deg2rad(point['model_pa'])], 
-                         [blob['rad_obs'], point['model_rad']], ls='--', c=color_char, alpha=0.6)
+                ax_fit.plot([np.deg2rad(blob['pa_obs']), np.deg2rad(point['model_pa'])], 
+                            [blob['rad_obs'], point['model_rad']], ls='--', c=color_char, alpha=0.6)
                 
-                label = None
-                if i == 0:
-                    beta_val = res_entry['fitted_beta']
-                    if pd.notna(res_entry.get('beta_upper_bound')):
-                        err_pos = res_entry['beta_upper_bound'] - beta_val
-                        err_neg = beta_val - res_entry['beta_lower_bound']
-                        label = f"fit {jet_side} (beta={beta_val:.4f} +{err_pos:.4f}/-{err_neg:.4f})"
-                    else:
-                        label = f"fit {jet_side} (beta={beta_val:.4f})"
-                ax2.plot(
+                ax_fit.plot(
                     np.deg2rad(point["model_pa"]), point["model_rad"],
                     marker="X",
                     markersize=5,
@@ -264,15 +298,15 @@ def plot_fit_and_calc_results(obs_id, blob_data_list, fit_results, params, pdf_o
                     markeredgewidth=1,
                     linestyle="None",
                     zorder=4,
-                    label=label,
+                    label=None,
                 )
             else:
                 # No intersection: assume plane of sky (mu=0) and canonical beta (for bookkeeping)
                 mu_plane = 0.0
                 tau_days = tau_core_to_knot_days_from_projected(float(rr), mu_plane)
-                _add_tau_label(ax2, th, rr, f"τ={tau_days:.1f} d", color_char)
+                _add_tau_label(ax_fit, th, rr, f"τ={tau_days:.1f} d", color_char)
 
-                ax2.plot(
+                ax_fit.plot(
                     th, rr,
                     marker="X",
                     ms=5,
@@ -283,22 +317,46 @@ def plot_fit_and_calc_results(obs_id, blob_data_list, fit_results, params, pdf_o
                     label=None,
                 )
 
-                offset = 0.95 if jet_side == "east" else 1.05
-
-    ax1.set_rmax(common_rmax); ax1.set_rmin(0)
-    ax2.set_rmax(common_rmax); ax2.set_rmin(0)
+    ax_fit.set_rmax(common_rmax); ax_fit.set_rmin(0)
+    # Set radial grid every 0.2 arcsec and label every other tick starting with the second
+    r_ticks = np.arange(0, common_rmax + 0.0001, 0.2)
+    ax_fit.yaxis.set_major_locator(FixedLocator(r_ticks))
+    r_tick_labels = [f"{r:.1f}" if (i % 2 == 0 and i > 0) else "" for i, r in enumerate(r_ticks)]
+    ax_fit.set_yticklabels(r_tick_labels, fontsize=14)
     
     # Configure Legend and Layout
-    handles, labels = ax2.get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    ax2.legend(by_label.values(), by_label.keys(), loc='upper left', bbox_to_anchor=(-0.265, 1.05), frameon=False, fontsize=11)
+    handles = [
+        Line2D([0], [0], marker='X', linestyle='None', markersize=7,
+               markerfacecolor='white', markeredgecolor='#000', markeredgewidth=1.3, color='#000',
+               label='Best-fit knot position'),
+        Line2D([0], [0], marker='o', linestyle='None', markersize=6,
+               markerfacecolor='#000', markeredgecolor='#000', color='#000',
+               label='Observed knot with positional errors'),
+        Line2D([0], [0], linestyle='-', color='#000', lw=1.8,
+               marker=r'$\rightarrow$', markersize=12, markerfacecolor='white', markeredgecolor='#000',
+               label='X-ray travel time (τ) arrow'),
+    ]
+    legend = ax_fit.legend(
+        handles=handles,
+        loc='upper center',
+        bbox_to_anchor=(0.5, 0.88),
+        frameon=True,
+        facecolor='white',
+        edgecolor='#999',
+        framealpha=0.9,
+        fontsize=14,
+        labelcolor="#000",
+    )
     
-    fig.subplots_adjust(left=0.05, right=0.88, top=0.85, bottom=0.1, wspace=0)
+    # Leave a narrow but safe margin on the right so the colorbar is very close yet not clipped
+    # Slightly lower the axes to add space between the title and the top tick labels
+    fig.subplots_adjust(left=0.1, right=0.9, top=0.86, bottom=0.12)
     
     # Add shared colorbar for time/age
-    cbar_ax = fig.add_axes([0.9, 0.15, 0.015, 0.7])
+    cbar_ax = fig.add_axes([0.85, 0.15, 0.04, 0.7])
     cbar = fig.colorbar(mappable, cax=cbar_ax)
-    cbar.set_label('travel time / age (days)', fontsize=12)
+    cbar.set_label('Jet Travel Time Since Ejection (Days)', fontsize=14, labelpad=10)
+    cbar.ax.tick_params(labelsize=14)
     
     if pdf_object: pdf_object.savefig(fig); plt.close(fig)
     else: plt.show()
