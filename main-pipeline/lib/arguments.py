@@ -25,6 +25,16 @@ def get_pipeline_args():
     parser.add_argument("--sigs", nargs="+", default=['mcmc'], 
                         help="list of signifiers for filenames (default: 'mcmc' - steps added auto)")
 
+    parser.add_argument(
+        "--skip-stages",
+        "--skip",
+        nargs="+",
+        default=[],
+        dest="skip_stages",
+        metavar="STAGE",
+        help="Stages to skip (accepts 1/fit, 2/track, 3/kinematics, 4/swift).",
+    )
+
     # System configuration overrides
     parser.add_argument("--base-dir", type=str, help="override base directory")
     
