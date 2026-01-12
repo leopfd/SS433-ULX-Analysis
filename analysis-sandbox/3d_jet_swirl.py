@@ -302,7 +302,42 @@ def plot_3d_scene(
     # Color map for age (matching ax2)
     cmap = plt.cm.rainbow
     norm = mcolors.Normalize(vmin=0, vmax=max(225, np.max(age)))
-    
+
+    # Equal aspect ratio precompute
+    all_coords = np.concatenate([xe, ye, ze, xw, yw, zw])
+    if show_blobs and len(blobs_xyz) > 0:
+        all_coords = np.concatenate([all_coords, blobs_xyz.flatten()])
+    r_max = np.max(np.abs(all_coords))
+    r_max = max(r_max, 1.0)
+    padding = 0.2 * r_max
+    axis_limit = r_max + padding
+    if axis_limit_override is not None:
+        axis_limit = float(axis_limit_override)
+
+    # Offset jets so they emerge from a small sphere
+    sphere_r = min(0.2, 0.05 * axis_limit)
+
+    def _offset_from_sphere(x, y, z):
+        r = np.sqrt(x**2 + y**2 + z**2)
+        r = np.nan_to_num(r, nan=0.0, posinf=0.0, neginf=0.0)
+        u = np.zeros((3,) + r.shape, dtype=float)
+        mask = r > 1e-8
+        u[0][mask] = x[mask] / r[mask]
+        u[1][mask] = y[mask] / r[mask]
+        u[2][mask] = z[mask] / r[mask]
+        new_r = sphere_r + r  # always start at sphere surface
+        return u[0] * new_r, u[1] * new_r, u[2] * new_r
+
+    xe_plot, ye_plot, ze_plot = _offset_from_sphere(xe_plot, ye_plot, ze_plot)
+    xw_plot, yw_plot, zw_plot = _offset_from_sphere(xw_plot, yw_plot, zw_plot)
+    blobs_xyz_offset = blobs_xyz.copy()
+    if blobs_xyz_offset.size > 0:
+        bx, by, bz = blobs_xyz_offset[:, 0], blobs_xyz_offset[:, 1], blobs_xyz_offset[:, 2]
+        bx, by, bz = _offset_from_sphere(bx, by, bz)
+        blobs_xyz_offset[:, 0] = bx
+        blobs_xyz_offset[:, 1] = by
+        blobs_xyz_offset[:, 2] = bz
+
     def _clip_xyz_c(x, y, z, c):
         if clip_radius is None:
             return x, y, z, c
@@ -314,26 +349,22 @@ def plot_3d_scene(
     xw_plot, yw_plot, zw_plot, age_w = _clip_xyz_c(xw_plot, yw_plot, zw_plot, age_plot)
 
     # Plot jet trajectories colored by age
-    scatter_e = ax.scatter(xe_plot, ye_plot, ze_plot, c=age_e, cmap=cmap, norm=norm, s=15, alpha=0.8, zorder=1)
-    scatter_w = ax.scatter(xw_plot, yw_plot, zw_plot, c=age_w, cmap=cmap, norm=norm, s=15, alpha=0.8, zorder=1)
+    scatter_e = ax.scatter(xe_plot, ye_plot, ze_plot, c=age_e, cmap=cmap, norm=norm, s=10, alpha=0.8, zorder=1)
+    scatter_w = ax.scatter(xw_plot, yw_plot, zw_plot, c=age_w, cmap=cmap, norm=norm, s=10, alpha=0.8, zorder=1)
     
     # Add light travel time arrows from source (core) to each blob
     if show_light_arrows:
-        for xyz, color in zip(blobs_xyz, blobs_colors):
+        for xyz, color in zip(blobs_xyz_offset, blobs_colors):
             arrow_color = 'blue' if color == 'blue' else 'red'
             ax.quiver(0, 0, 0, xyz[0], xyz[1], xyz[2], 
                      color=arrow_color, alpha=0.5, arrow_length_ratio=0.2, linewidth=2)
     
     # Plot observed blobs (higher zorder to appear on top of jets)
-    if show_blobs and len(blobs_xyz) > 0:
-        for i, (xyz, color) in enumerate(zip(blobs_xyz, blobs_colors)):
+    if show_blobs and len(blobs_xyz_offset) > 0:
+        for i, (xyz, color) in enumerate(zip(blobs_xyz_offset, blobs_colors)):
             marker_color = 'blue' if color == 'blue' else 'red'
             ax.scatter(*xyz, c=marker_color, s=100, marker='o', edgecolors='black', 
                       linewidths=2, zorder=10, label='Jet knot' if i == 0 else '')
-    
-    # Plot central source
-    ax.scatter([0], [0], [0], c='gold', marker='*', s=300, edgecolors='black', 
-              linewidths=0.5, zorder=10, label='Source')
     
     # Labels and title
     ax.set_xlabel('x (arcsec)', fontsize=11)
@@ -349,16 +380,6 @@ def plot_3d_scene(
     ax.grid(False)
     
     # Equal aspect ratio
-    all_coords = np.concatenate([xe, ye, ze, xw, yw, zw])
-    if show_blobs and len(blobs_xyz) > 0:
-        all_coords = np.concatenate([all_coords, blobs_xyz.flatten()])
-    
-    r_max = np.max(np.abs(all_coords))
-    r_max = max(r_max, 1.0)
-    padding = 0.2 * r_max
-    axis_limit = r_max + padding
-    if axis_limit_override is not None:
-        axis_limit = float(axis_limit_override)
     ax.set_xlim(-axis_limit, axis_limit)
     ax.set_ylim(-axis_limit, axis_limit)
     ax.set_zlim(-axis_limit, axis_limit)
@@ -367,6 +388,15 @@ def plot_3d_scene(
         ax.invert_xaxis()
     if invert_zaxis:
         ax.invert_zaxis()
+
+    # Plot central source as a small sphere
+    sphere_r = min(0.2, 0.05 * axis_limit)
+    u = np.linspace(0, 2 * np.pi, 24)
+    v = np.linspace(0, np.pi, 12)
+    xs = sphere_r * np.outer(np.cos(u), np.sin(v))
+    ys = sphere_r * np.outer(np.sin(u), np.sin(v))
+    zs = sphere_r * np.outer(np.ones_like(u), np.cos(v))
+    ax.plot_surface(xs, ys, zs, color='black', edgecolor='none', alpha=1.0, zorder=9)
 
     # Optional overlay image on -y plane
     if overlay_image is not None and overlay_scale_arcsec:
@@ -431,9 +461,9 @@ def plot_3d_scene(
 
     # Add arrows from blobs to observer (after limits/observer placement)
     observer_arrow_handles = []
-    if show_light_arrows and len(blobs_xyz) > 0:
+    if show_light_arrows and len(blobs_xyz_offset) > 0:
         obs_vec = np.array([observer_x, observer_y, observer_z])
-        for xyz, color in zip(blobs_xyz, blobs_colors):
+        for xyz, color in zip(blobs_xyz_offset, blobs_colors):
             vec = obs_vec - np.array(xyz)
             arrow_color = 'blue' if color == 'blue' else 'red'
             h = ax.quiver(
@@ -528,30 +558,37 @@ def save_scene(scene, out_path, seconds, fps, mode="rotate", overlay_image=None,
 
         frames = max(2, int(seconds * fps))
         progress_step = max(1, frames // 20)
+        hold_frames = min(frames - 1, int(fps * 5))  # ~5s hold on initial view
+        move_frames = max(2, frames - hold_frames)
 
         def update(i):
             if i % progress_step == 0 or i == frames - 1:
                 print(f"Rendering frame {i+1}/{frames}", end="\r")
-            phase = i / (frames - 1)  # 0 -> 1 over animation
-            ramp_in = 0.08
-            ramp_out = 0.08
-            spin_frac = max(1e-6, 1.0 - ramp_in - ramp_out)
-            spin_phase = np.clip((phase - ramp_in) / spin_frac, 0.0, 1.0)
-            spin_deg = 540.0
-
-            if phase < ramp_in:
-                t = phase / max(ramp_in, 1e-6)
-                elev = start_elev + (base_elev - start_elev) * t
-                azim = start_azim + (base_azim - start_azim) * t
-            elif phase > 1.0 - ramp_out:
-                t = (phase - (1.0 - ramp_out)) / max(ramp_out, 1e-6)
-                azim_spin = base_azim + spin_deg
-                elev_spin = base_elev  # wobble ends at zero amplitude at spin_phase=1
-                elev = elev_spin + (start_elev - elev_spin) * t
-                azim = azim_spin + (start_azim - azim_spin) * t
+            if i < hold_frames:
+                elev = start_elev
+                azim = start_azim
             else:
-                azim = base_azim + spin_deg * spin_phase + 15.0 * np.sin(2 * np.pi * spin_phase)
-                elev = base_elev + 12.0 * np.sin(4 * np.pi * spin_phase)
+                idx = i - hold_frames
+                phase = idx / (move_frames - 1)  # 0 -> 1 after hold
+                ramp_in = 0.08
+                ramp_out = 0.08
+                spin_frac = max(1e-6, 1.0 - ramp_in - ramp_out)
+                spin_phase = np.clip((phase - ramp_in) / spin_frac, 0.0, 1.0)
+                spin_deg = 540.0
+
+                if phase < ramp_in:
+                    t = phase / max(ramp_in, 1e-6)
+                    elev = start_elev + (base_elev - start_elev) * t
+                    azim = start_azim + (base_azim - start_azim) * t
+                elif phase > 1.0 - ramp_out:
+                    t = (phase - (1.0 - ramp_out)) / max(ramp_out, 1e-6)
+                    azim_spin = base_azim + spin_deg
+                    elev_spin = base_elev  # wobble ends at zero amplitude at spin_phase=1
+                    elev = elev_spin + (start_elev - elev_spin) * t
+                    azim = azim_spin + (start_azim - azim_spin) * t
+                else:
+                    azim = base_azim + spin_deg * spin_phase + 15.0 * np.sin(2 * np.pi * spin_phase)
+                    elev = base_elev + 12.0 * np.sin(4 * np.pi * spin_phase)
             ax.view_init(elev=elev, azim=azim)
             return ax,
     else:
@@ -578,11 +615,68 @@ def save_scene(scene, out_path, seconds, fps, mode="rotate", overlay_image=None,
         age = scene["age"]
         xe, ye, ze = scene["east_xyz"]
         xw, yw, zw = scene["west_xyz"]
+        sphere_r_time = min(0.2, 0.05 * 5.0)
+
+        def _offset_from_sphere_arr(x, y, z, r):
+            rad = np.sqrt(x**2 + y**2 + z**2)
+            rad = np.nan_to_num(rad, nan=0.0, posinf=0.0, neginf=0.0)
+            u = np.zeros((3,) + rad.shape, dtype=float)
+            mask = rad > 1e-8
+            u[0][mask] = x[mask] / rad[mask]
+            u[1][mask] = y[mask] / rad[mask]
+            u[2][mask] = z[mask] / rad[mask]
+            new_r = r + rad
+            return u[0] * new_r, u[1] * new_r, u[2] * new_r
+
+        xe, ye, ze = _offset_from_sphere_arr(xe, ye, ze, sphere_r_time)
+        xw, yw, zw = _offset_from_sphere_arr(xw, yw, zw, sphere_r_time)
         frames = max(2, int(seconds * fps))
         progress_step = max(1, frames // 20)
         max_age = float(np.max(age))
         # Ejection timeline: earliest knot (largest age) starts at t=0; youngest at t=max_age.
         eject_time = max_age - age
+
+        # Jet direction arrows (at core, rotate with precession)
+        arrow_len = 0.7
+
+        def _unit_vec_at(idx, x, y, z):
+            vec = np.array([x[idx], y[idx], z[idx]], dtype=float)
+            n = np.linalg.norm(vec)
+            if n < 1e-6 and idx + 1 < len(x):
+                vec = np.array([x[idx + 1], y[idx + 1], z[idx + 1]], dtype=float)
+                n = np.linalg.norm(vec)
+            if n < 1e-6:
+                return np.array([1.0, 0.0, 0.0])
+            return vec / n
+
+        dir_e0 = _unit_vec_at(1, xe, ye, ze)
+        dir_w0 = _unit_vec_at(1, xw, yw, zw)
+        line_e = ax.quiver(
+            0,
+            0,
+            0,
+            dir_e0[0] * arrow_len,
+            dir_e0[1] * arrow_len,
+            dir_e0[2] * arrow_len,
+            color='blue',
+            alpha=0.7,
+            linewidth=1.2,
+            arrow_length_ratio=0.2,
+            zorder=5,
+        )
+        line_w = ax.quiver(
+            0,
+            0,
+            0,
+            dir_w0[0] * arrow_len,
+            dir_w0[1] * arrow_len,
+            dir_w0[2] * arrow_len,
+            color='red',
+            alpha=0.7,
+            linewidth=1.2,
+            arrow_length_ratio=0.2,
+            zorder=5,
+        )
 
         def _positions_at(t_now, x, y, z):
             active = t_now >= eject_time
@@ -616,7 +710,36 @@ def save_scene(scene, out_path, seconds, fps, mode="rotate", overlay_image=None,
             azim = base_azim + spin_deg * spin_phase
             elev = base_elev + wobble_deg * np.sin(2 * np.pi * spin_phase)
             ax.view_init(elev=elev, azim=azim)
-            return scatter_e, scatter_w
+            # Update jet direction arrows to current precession phase
+            idx_dir = min(int((t_now / max(max_age, 1e-6)) * (len(age) - 1)), len(age) - 1)
+            dir_e = _unit_vec_at(idx_dir, xe, ye, ze)
+            dir_w = _unit_vec_at(idx_dir, xw, yw, zw)
+            nonlocal line_e, line_w
+            line_e.remove()
+            line_w.remove()
+            line_e = ax.quiver(
+                0, 0, 0,
+                dir_e[0] * arrow_len,
+                dir_e[1] * arrow_len,
+                dir_e[2] * arrow_len,
+                color='blue',
+                alpha=0.7,
+                linewidth=1.2,
+                arrow_length_ratio=0.2,
+                zorder=5,
+            )
+            line_w = ax.quiver(
+                0, 0, 0,
+                dir_w[0] * arrow_len,
+                dir_w[1] * arrow_len,
+                dir_w[2] * arrow_len,
+                color='red',
+                alpha=0.7,
+                linewidth=1.2,
+                arrow_length_ratio=0.2,
+                zorder=5,
+            )
+            return scatter_e, scatter_w, line_e, line_w
 
     writer = None
     target_path = out_path
