@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.lines import Line2D
 from astropy.io import fits
-from scipy.ndimage import rotate
+from scipy.ndimage import rotate, gaussian_filter
 import emcee
 from emcee.backends import HDFBackend
 import corner
@@ -598,6 +598,8 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
             dark_colors = ['navy', 'darkgreen', 'indigo', 'xkcd:burgundy', 'xkcd:shit']
             
             # Overlay component position distributions
+            best_label_used = False
+            median_label_used = False
             for i, comp_name in enumerate(comp_names):
                 x_name = f"{comp_name}.xpos"; y_name = f"{comp_name}.ypos"
                 if x_name in thawed_par_names and y_name in thawed_par_names:
@@ -615,11 +617,12 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                         comp_color = colors[i % len(colors)]
                         dark_c = dark_colors[i % len(dark_colors)]
                         base_rgb = mcolors.to_rgb(comp_color)
-                        peak = H.max()
+                        smooth_H = gaussian_filter(H, sigma=1.0)
+                        peak = smooth_H.max()
                         levels = [peak * 0.1, peak * 0.3, peak * 0.5, peak * 0.7, peak * 0.9]
                         fill_colors = [(*base_rgb, 0.1), (*base_rgb, 0.3), (*base_rgb, 0.5), (*base_rgb, 0.7), (*base_rgb, 0.9)]
-                        ax.contourf(H, levels=levels, colors=fill_colors, extend='max', extent=plot_extent)
-                        ax.contour(H, levels=levels, colors=[comp_color], linewidths=1.0, alpha=0.9, extent=plot_extent)
+                        ax.contourf(smooth_H, levels=levels, colors=fill_colors, extend='max', extent=plot_extent)
+                        ax.contour(smooth_H, levels=levels, colors=[comp_color], linewidths=1.0, alpha=0.9, extent=plot_extent)
 
                         # Optional Overlay of Kinematic Model for context
                         if ephemeris is not None and date_obs is not None:
@@ -673,25 +676,37 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                                 y_off_r = (mu_r_dec * factor) / hrc_pix_scale
 
                                 # Plot
-                                ax.plot(core_x + x_off_b, core_y + y_off_b, 'b--', linewidth=1.5, alpha=0.8, label='Model (Blue)')
-                                ax.plot(core_x + x_off_r, core_y + y_off_r, 'r--', linewidth=1.5, alpha=0.8, label='Model (Red)')
-                                ax.scatter([core_x], [core_y], marker='+', color='white', s=100, zorder=30, label='Core Center')
+                                jet_color_b = "#2a9df4"
+                                jet_color_r = "#d62728"
+                                ax.plot(core_x + x_off_b, core_y + y_off_b, '--', color=jet_color_b, linewidth=3.2, alpha=0.9, label='Jet Model (Approaching)')
+                                ax.plot(core_x + x_off_r, core_y + y_off_r, '--', color=jet_color_r, linewidth=3.2, alpha=0.9, label='Jet Model (Receding)')
+                                ax.scatter([core_x], [core_y], marker='+', color='white', s=100, zorder=30, label=None)
 
                             except Exception as e:
                                 print(f"Warning: Could not overlay jet model: {e}")
 
                         bf_x = best_fit_values[x_idx]; bf_y = best_fit_values[y_idx]
-                        ax.scatter(bf_x, bf_y, marker='o', color=dark_c, s=100, zorder=20, edgecolors='white', label=f"{comp_name} best fit")
+                        bf_label = "Best Fit" if not best_label_used else "_nolegend_"
+                        ax.scatter(bf_x, bf_y, marker='o', color=dark_c, s=160, zorder=20, edgecolors='white', label=bf_label)
+                        best_label_used = True
                         if mcmc_results is not None:
                             med_x = mcmc_results['parvals'][x_idx]
                             med_y = mcmc_results['parvals'][y_idx]
-                            ax.scatter(med_x, med_y, marker='x', color=dark_c, s=200, linewidth=3, zorder=19, label=f"{comp_name} median")
+                            med_label = "Median" if not median_label_used else "_nolegend_"
+                            ax.scatter(med_x, med_y, marker='x', color=dark_c, s=320, linewidth=3, zorder=19, label=med_label)
+                            median_label_used = True
 
-            ax.set_title(f"walker density map - obsid {observation}"); ax.set_xlabel("x pixel"); ax.set_ylabel("y pixel")
+            ax.set_title(f"Walker Density Map - Obsid {observation}", fontsize=32, pad=22)
+            ax.set_xlabel("X Pixel", fontsize=28); ax.set_ylabel("Y Pixel", fontsize=28)
+            ax.tick_params(labelsize=26)
             handles, labels = ax.get_legend_handles_labels()
             by_label = dict(zip(labels, handles))
-            ax.legend(by_label.values(), by_label.keys(), loc='upper right')
-            walker_map_fig.colorbar(im_data, ax=ax, label="counts", shrink=0.8); walker_map_fig.tight_layout()
+            legend = ax.legend(by_label.values(), by_label.keys(), loc='upper right', fontsize=26)
+            legend.get_frame().set_alpha(0.9)
+            cbar = walker_map_fig.colorbar(im_data, ax=ax, shrink=0.8, pad=0.03)
+            cbar.set_label("Counts", fontsize=28, labelpad=-2)
+            cbar.ax.tick_params(labelsize=26)
+            walker_map_fig.tight_layout()
 
             # Generate Corner Plot
             total_samples = flat_samples.shape[0]
@@ -789,20 +804,56 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
     for i, comp_name in enumerate(comp_names):
         comp_vals = get_model_component_image(comp_name).y
         if not np.any(comp_vals > 0): continue
-        color = base_colors[i % len(base_colors)]
-        ax.contour(comp_vals, levels=[0.2 * np.max(comp_vals)], colors=[color], linestyles=['--'], linewidths=2)
+        if comp_name == 'g1':
+            color = 'white'
+        elif comp_name == 'g4':
+            color = 'xkcd:light lavender'
+        else:
+            color = base_colors[i % len(base_colors)]
+        peak_val = float(np.nanmax(comp_vals))
+        if peak_val <= 0:
+            continue
+        # Contours at fixed fractions of the peak: 95%, 80%, 60%, 20%
+        contour_levels = peak_val * np.array([0.95, 0.80, 0.60, 0.20], dtype=float)
+        contour_levels = np.unique(np.clip(contour_levels, np.finfo(float).eps, None))
+        ax.contour(
+            comp_vals,
+            levels=contour_levels,
+            colors=[color],
+            linestyles=['--'],
+            linewidths=2.0,
+            alpha=0.9,
+        )
         legend_elements.append(Line2D([0], [0], lw=2, linestyle='--', color=color, label=f"{comp_name}"))
-    if legend_elements: ax.legend(handles=legend_elements, loc='upper right')
-    ax.set_title(f"{observation} data + best fit overlay"); fig.colorbar(im, ax=ax, label="counts", shrink=0.53)
+    if legend_elements: ax.legend(handles=legend_elements, loc='upper right', fontsize=20)
+    ax.set_title(f"{observation} Data and Best Fit Overlay", fontsize=26, pad=16)
+    ax.set_xlabel("X Pixel", fontsize=24)
+    ax.set_ylabel("Y Pixel", fontsize=24)
+    cbar = fig.colorbar(im, ax=ax, label="Counts", shrink=0.53, pad=0.006)
+    cbar.ax.tick_params(labelsize=18)
+    cbar.set_label("Counts", fontsize=22, labelpad=-4)
 
     ax = axs[1]
     im = ax.imshow(model_masked, origin='lower', cmap='gnuplot2', norm=log_norm, interpolation='nearest')
-    ax.set_title("best fit model"); fig.colorbar(im, ax=ax, label="model counts", shrink=0.53)
+    ax.set_title("Best Fit Model", fontsize=26, pad=16)
+    ax.set_xlabel("X Pixel", fontsize=24)
+    ax.set_ylabel("Y Pixel", fontsize=24)
+    cbar = fig.colorbar(im, ax=ax, label="Model Counts", shrink=0.53, pad=0.006)
+    cbar.ax.tick_params(labelsize=18)
+    cbar.set_label("Model Counts", fontsize=22, labelpad=-4)
 
     ax = axs[2]
     im = ax.imshow(np.abs(resid_dev), origin='lower', cmap='gnuplot2', norm=mcolors.Normalize(vmin=0, vmax=5), interpolation='nearest')
-    ax.set_title("poisson deviance (best fit)"); fig.colorbar(im, ax=ax, label="|residuals|", shrink=0.53)
+    ax.set_title("Poisson Deviance Residuals", fontsize=26, pad=16)
+    ax.set_xlabel("X Pixel", fontsize=24)
+    ax.set_ylabel("Y Pixel", fontsize=24)
+    cbar = fig.colorbar(im, ax=ax, label="Poisson deviance |√D|", shrink=0.53, pad=0.006)
+    cbar.ax.tick_params(labelsize=18)
+    cbar.set_label("Poisson deviance |√D|", fontsize=22, labelpad=0)
         
+    for ax in axs:
+        ax.tick_params(labelsize=18)
+    
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     return summary_output, fig, corner_fig, walker_map_fig
 
