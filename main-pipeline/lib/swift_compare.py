@@ -123,6 +123,7 @@ def plot_swift_comparison(tracker_df, ejection_df):
     swift_dates, swift_rate, swift_err = swift_arr[order].T
 
     out_file = os.path.join(config.DIR_JET_PLOTS, f'swift-comparison-{config.FILE_ID}.pdf')
+    core_data = pd.DataFrame()
 
     style_ctx = {
         "axes.spines.top": False,
@@ -147,6 +148,27 @@ def plot_swift_comparison(tracker_df, ejection_df):
             fmt='.', color='gray', ecolor='lightgray',
             label='Swift/XRT (WT+PC)', zorder=1
         )
+
+        # Core HRC rates at observation times (no scaling; compare directly to Swift)
+        core_mask = tracker_df.get("component", pd.Series(dtype=str)).astype(str) == config.G1_COMPONENT
+        core_cols = ["mjd", "nominal", "minus_err", "plus_err"]
+        if core_mask.any() and all(c in tracker_df.columns for c in core_cols):
+            core_data = tracker_df.loc[core_mask, core_cols].dropna(subset=["mjd", "nominal"])
+            if not core_data.empty:
+                y_core = core_data["nominal"]
+                yerr_core = [core_data["minus_err"], core_data["plus_err"]]
+                ax.errorbar(
+                    core_data["mjd"],
+                    y_core,
+                    yerr=yerr_core,
+                    fmt='o',
+                    color='black',
+                    ecolor='black',
+                    markersize=5,
+                    alpha=0.9,
+                    label='HRC core',
+                    zorder=5,
+                )
 
         comp_series = plot_df['component'].astype(str)
 
@@ -293,6 +315,22 @@ def plot_swift_comparison(tracker_df, ejection_df):
                 fmt='.', color='gray', ecolor='lightgray',
                 label='Swift/XRT (WT+PC)', zorder=1
             )
+
+            if not core_data.empty:
+                y_core = core_data["nominal"]
+                yerr_core = [core_data["minus_err"], core_data["plus_err"]]
+                ax.errorbar(
+                    core_data["mjd"],
+                    y_core,
+                    yerr=yerr_core,
+                    fmt='o',
+                    color='black',
+                    ecolor='black',
+                    markersize=5,
+                    alpha=0.9,
+                    label='HRC core',
+                    zorder=5,
+                )
 
             plot_df_lt = plot_df.assign(ejection_mjd=plot_df["ejection_mjd_lt"])
 
