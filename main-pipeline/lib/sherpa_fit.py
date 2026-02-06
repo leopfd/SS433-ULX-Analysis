@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import numpy as np
+import math
 
 import matplotlib
 matplotlib.use('Agg') 
@@ -145,7 +146,7 @@ def src_psf_images(obsid, infile, x0, y0, diameter, wcs_ra, wcs_dec, binsize=0.2
 def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                        background=0, pos_min=(0, 0), pos_max=None, exptime=None, lock_fwhm=True,
                        freeze_components=None, use_mcmc=True, mcmc_iter=5000, mcmc_burn_in_frac=0.2,
-                       n_walkers=32, ball_size=1e-4, auto_stop=False, sigma_val=1, 
+                       n_walkers=32, ball_size=1e-4, auto_stop=False, sigma_val=1,
                        prefix="g", confirm=True, imgfit=False, progress_chunks=50, progress_step=None, progress_queue=None,
                        chain_base_dir=None, recalc=False, bin_size=None, signifiers=None, ephemeris=None, date_obs=None):
     """
@@ -232,7 +233,7 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
         if input(f"  (obsid {observation}) proceed with fit? (y/n): ").lower() != "y": return None, None, None, None, None
 
     # Perform initial optimization using Sherpa built in methods
-    # We use C STAT (Cash statistic) suitable for Poisson data 
+    # We use C STAT (Cash statistic) suitable for Poisson data
     # Two stage optimization: MonCar (Monte Carlo) to find global basin, then Simplex for local refinement
     set_stat('cstat')
     set_method('moncar'); set_method_opt('numcores', 1)
@@ -468,12 +469,20 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                             update_interval = max(1, int(mcmc_iter / progress_chunks))
                         if remaining_steps < update_interval:
                             update_interval = remaining_steps
+                        ticks_sent = 0
+                        start_iter = current_step
+                        if progress_queue and update_interval > 0 and start_iter > 0:
+                            prev_ticks = start_iter // update_interval
+                            if prev_ticks > 0:
+                                progress_queue.put(prev_ticks)
+                                ticks_sent += prev_ticks
                         # Iterate step by step to allow interruption and progress reporting
                         for i, sample in enumerate(sampler.sample(p0, iterations=remaining_steps, progress=False)):
                             
                             # Update global progress bar via queue
-                            if progress_queue and (i + 1) % update_interval == 0: 
+                            if progress_queue and (i + 1) % update_interval == 0:
                                 progress_queue.put(1)
+                                ticks_sent += 1
                             
                             # Auto stop logic based on autocorrelation time
                             if auto_stop and sampler.iteration >= min_steps_before_check and (sampler.iteration % check_interval == 0):
@@ -493,6 +502,15 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                                             break
                                 except Exception:
                                     pass
+                        if progress_queue and update_interval > 0:
+                            end_iter = sampler.iteration
+                            expected_ticks = math.ceil(mcmc_iter / update_interval)
+                            actual_ticks = math.ceil(end_iter / update_interval)
+                            missing_ticks = actual_ticks - ticks_sent
+                            if missing_ticks > 0:
+                                progress_queue.put(missing_ticks)
+                            if expected_ticks > actual_ticks:
+                                progress_queue.put(("adjust_total", expected_ticks - actual_ticks))
                         
                 except Exception as e:
                     print(f"  error (obsid {observation}) sampler crashed: {e}")
@@ -533,19 +551,27 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
 
             try:
                 rhat_vals = compute_split_rhat(raw_chain)
-                rhat_max = np.max(rhat_vals)
             except Exception:
                 rhat_vals = [np.nan] * ndim
-                rhat_max = np.nan
 
-            auto_stop_label = "on" if auto_stop else "off"
+            rhat_vals = np.asarray(rhat_vals, dtype=float)
+            finite_mask = np.isfinite(rhat_vals)
+            finite_rhat = rhat_vals[finite_mask]
+            if finite_rhat.size > 0:
+                rhat_max = np.max(finite_rhat)
+                rhat_display = f"{rhat_max:.4f}"
+                n_undefined = int(rhat_vals.size - finite_rhat.size)
+                rhat_note = f" (goal < 1.1, n/a for {n_undefined})" if n_undefined else " (goal < 1.1)"
+            else:
+                rhat_display = "n/a"
+                rhat_note = " (goal < 1.1, all params undefined)"
             conv_str = (
                 f"convergence stats:\n"
                 f"  max autocorr time (tau): {tau_max:.1f} steps\n"
-                f"  max split-rhat:          {rhat_max:.4f} (goal < 1.1)\n"
+                f"  max split-rhat:          {rhat_display}{rhat_note}\n"
                 f"  effective samples (ess): {int(ess)}\n"
                 f"  chain length / tau:      {raw_chain.shape[0] / tau_max:.1f} (goal > 50)\n"
-                f"  auto-stop:               {auto_stop_label} (check every {check_interval} steps; stop at > {AUTO_STOP_TAU_FACTOR}*tau)\n\n"
+                "\n"
             )
 
             # Determine quantiles for error reporting based on requested sigma
@@ -876,8 +902,9 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
 
 def process_observation(infile, progress_queue, obsid_coords, mcmc_scale_factors, emp_psf_file,
                         n_components_multi, run_mcmc_multi, mcmc_iter_multi,
-                        mcmc_n_walkers, mcmc_ball_size, auto_stop=False, sigma_val=1, progress_step=None, progress_chunks=50,
-                        recalc=False, chain_base_dir=None, signifiers=None, ephemeris=None):
+                        mcmc_n_walkers, mcmc_ball_size, auto_stop=False,
+                        sigma_val=1, progress_step=None, progress_chunks=50, recalc=False,
+                        chain_base_dir=None, signifiers=None, ephemeris=None):
     """
     Worker function to process a single observation end to end
     Orchestrates the Centroid Fit -> Source Fit -> Multi Component Fit pipeline

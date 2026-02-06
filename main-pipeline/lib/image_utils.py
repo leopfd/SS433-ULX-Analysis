@@ -125,14 +125,33 @@ def write_pixelscale(file: str, nx: int, ny: int, ra: str, dec: str, hrc_pscale_
 def compute_split_rhat(chain):
     # Computes the Gelman Rubin convergence statistic or split R hat to assess if the MCMC chains have mixed well
     n_steps, n_walkers, n_params = chain.shape
+
+    # Require enough samples to split and compute variance
+    if n_steps < 4 or n_walkers < 2:
+        return np.full(n_params, np.nan, dtype=float)
+
+    # Ensure even number of steps so halves match
+    if n_steps % 2 != 0:
+        chain = chain[:-1]
+        n_steps -= 1
+
     half = n_steps // 2
+    if half < 2:
+        return np.full(n_params, np.nan, dtype=float)
+
+    # Track parameters with non-finite samples
+    finite_mask = np.isfinite(chain).all(axis=(0, 1))
+
     split_chain = np.concatenate((chain[:half], chain[half:]), axis=1)
     N = half
-    M = n_walkers * 2
     var_within = np.var(split_chain, axis=0, ddof=1)
     W = np.mean(var_within, axis=0)
     mean_chains = np.mean(split_chain, axis=0)
     B = N * np.var(mean_chains, axis=0, ddof=1)
     var_plus = ((N - 1) / N) * W + (1 / N) * B
-    rhat = np.sqrt(var_plus / W)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rhat = np.sqrt(var_plus / W)
+
+    rhat = np.where((W > 0) & finite_mask, rhat, np.nan)
     return rhat

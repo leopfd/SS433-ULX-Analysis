@@ -16,22 +16,54 @@ def compile_pngs_to_pdf(pbar, png_files, pdf_filename):
     if not os.path.exists(png_files[0]):
         print(f"error: cannot find file {png_files[0]} to start pdf.")
         return
-    images = []
-    
-    # Open the first image to establish the base for the PDF file
-    img1 = Image.open(png_files[0]).convert('RGB')
-    pbar.update(1) 
-    
-    # Iterate through the rest of the file list and append them
-    for png_file in png_files[1:]:
-        if os.path.exists(png_file):
-            images.append(Image.open(png_file).convert('RGB'))
+    def _open_rgb(path):
+        img = Image.open(path)
+        if img.mode in ("RGBA", "LA") or ("transparency" in img.info):
+            img = img.convert("RGBA")
+            bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+            img = Image.alpha_composite(bg, img).convert("RGB")
         else:
-            print(f"warning: missing file {png_file}, skipping.")
-        pbar.update(1) 
-    
+            img = img.convert("RGB")
+        return img
+    # Prefer streaming PDF assembly if img2pdf is available to reduce memory usage.
+    try:
+        import img2pdf  # type: ignore
+    except Exception:
+        img2pdf = None
+
+    existing_files = [f for f in png_files if os.path.exists(f)]
+    if not existing_files:
+        print("error: no existing png files found to compile.")
+        return
+
+    if img2pdf is not None:
+        try:
+            with open(pdf_filename, "wb") as f:
+                f.write(img2pdf.convert(existing_files))
+            pbar.update(len(png_files))
+            return
+        except Exception as e:
+            print(f"warning: img2pdf failed ({e}); falling back to PIL.")
+
+    images = []
+
+    # Open the first image to establish the base for the PDF file
+    img1 = _open_rgb(existing_files[0])
+    pbar.update(1)
+
+    # Iterate through the rest of the file list and append them
+    for png_file in existing_files[1:]:
+        try:
+            images.append(_open_rgb(png_file))
+        except Exception:
+            print(f"warning: could not open file {png_file}, skipping.")
+        pbar.update(1)
+
     # Save the accumulated images as a single PDF document
-    img1.save(pdf_filename, "PDF", resolution=400.0, save_all=True, append_images=images)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Image contains an alpha channel.*")
+        img1.save(pdf_filename, "PDF", resolution=400.0, save_all=True, append_images=images)
 
 def run_pipeline():
     # Disable the safety limit for image size to handle large scientific plots
@@ -88,8 +120,9 @@ def run_pipeline():
     # Use spawn context for compatibility across different OS multiprocessing implementations
     ctx = multiprocess.get_context('spawn')
     
-    # Create a process-safe queue to handle progress updates from child processes
-    progress_queue = ctx.Queue()
+    # Create a manager queue to handle progress updates from child processes (spawn-safe)
+    manager = ctx.Manager()
+    progress_queue = manager.Queue()
     
     # Freeze constant arguments into a partial function to pass to the worker pool
     worker_func = partial(sherpa_fit.process_observation, 
@@ -133,14 +166,23 @@ def run_pipeline():
             async_result = pool.map_async(worker_func, event_files)
             
             # Poll the worker pool and update the progress bar from the queue until all tasks are done
-            while not async_result.ready():
+            def _drain_progress_queue():
                 while not progress_queue.empty():
-                    pbar.update(progress_queue.get())
+                    msg = progress_queue.get()
+                    if isinstance(msg, tuple) and len(msg) == 2 and msg[0] == "adjust_total":
+                        delta = int(msg[1])
+                        if delta > 0:
+                            pbar.total = max(pbar.n, pbar.total - delta)
+                            pbar.refresh()
+                    else:
+                        pbar.update(int(msg))
+
+            while not async_result.ready():
+                _drain_progress_queue()
                 time.sleep(0.1) 
             
             # Ensure any remaining progress updates are processed after the pool finishes
-            while not progress_queue.empty():
-                pbar.update(progress_queue.get())
+            _drain_progress_queue()
             results = async_result.get()
 
     print()
