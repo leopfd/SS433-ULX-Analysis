@@ -1,13 +1,14 @@
 import os
 import glob
 import time
+import math
 import multiprocess
 from functools import partial
 from tqdm import tqdm
 from PIL import Image
 
 import config
-from lib.sherpa_fit import process_observation
+import lib.sherpa_fit as sherpa_fit
 from lib.arguments import get_pipeline_args
 
 def compile_pngs_to_pdf(pbar, png_files, pdf_filename):
@@ -74,10 +75,12 @@ def run_pipeline():
     multi_results_filename = config.MULTI_LOG_TXT
     
     # Determine progress bar ticks per file to synchronize with MCMC steps
-    target_update_count = 200
+    progress_step = None
     if run_mcmc:
-        worker_interval = max(1, int(mcmc_iterations / target_update_count))
-        ticks_per_file = mcmc_iterations // worker_interval
+        target_updates = max(1, int(config.MCMC_PROGRESS_TARGET_UPDATES))
+        scaled_step = math.ceil(mcmc_iterations / target_updates)
+        progress_step = max(1, min(int(config.MCMC_PROGRESS_STEP), int(scaled_step)))
+        ticks_per_file = math.ceil(mcmc_iterations / progress_step)
     else:
         ticks_per_file = 0
     total_steps = len(event_files) * ticks_per_file
@@ -90,7 +93,7 @@ def run_pipeline():
     progress_queue = manager.Queue()
     
     # Freeze constant arguments into a partial function to pass to the worker pool
-    worker_func = partial(process_observation, 
+    worker_func = partial(sherpa_fit.process_observation, 
                           progress_queue=progress_queue,
                           obsid_coords=config.OBSID_COORDS, 
                           mcmc_scale_factors={}, 
@@ -102,12 +105,20 @@ def run_pipeline():
                           mcmc_ball_size=mcmc_ball_size,
                           auto_stop=config.AUTO_STOP,
                           sigma_val=config.SIGMA_VAL,
-                          progress_chunks=target_update_count,
+                          progress_step=progress_step if run_mcmc else None,
                           recalc=recalculate_chains,
                           chain_base_dir=config.DIR_CHAINS,
                           signifiers=config.SIGNIFIERS,
                           ephemeris=config.EPHEMERIS
                          )
+
+    if run_mcmc:
+        auto_stop_label = "on" if config.AUTO_STOP else "off"
+        print(
+            f"auto-stop: {auto_stop_label} "
+            f"(check every {sherpa_fit.AUTO_STOP_CHECK_INTERVAL} steps; "
+            f"stop at > {sherpa_fit.AUTO_STOP_TAU_FACTOR}*tau)"
+        )
 
     num_processes = os.cpu_count()
     print(f"starting parallel processing on {num_processes} cores...\n")

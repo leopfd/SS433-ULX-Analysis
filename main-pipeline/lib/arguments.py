@@ -1,6 +1,16 @@
 import argparse
 import sys
 
+def _str2bool(v):
+    if isinstance(v, bool):
+        return v
+    val = v.strip().lower()
+    if val in ("true", "t", "1", "yes", "y", "on"):
+        return True
+    if val in ("false", "f", "0", "no", "n", "off"):
+        return False
+    raise argparse.ArgumentTypeError("auto-stop must be true or false")
+
 def get_pipeline_args():
     # Initialize the argument parser with a description of the tool
     parser = argparse.ArgumentParser(description="SS433 Analysis Pipeline")
@@ -18,7 +28,12 @@ def get_pipeline_args():
     parser.add_argument("--recalc", action="store_true", help="force recalculation of mcmc chains")
     parser.add_argument("--steps", type=int, default=500, help="mcmc iterations (default: 500)")
     parser.add_argument("--ball", type=float, default=1e-4, help="mcmc ball size (default: 1e-4)")
-    parser.add_argument("--auto-stop", action="store_true", help="stop mcmc automatically when convergence is reached")
+    parser.add_argument(
+        "--auto-stop",
+        type=_str2bool,
+        default=True,
+        help="enable/disable mcmc auto-stop (true/false, default: true)",
+    )
 
     # Configuration for physical models and output file labeling conventions
     parser.add_argument("--ephem", type=str, default="simple", choices=["simple", "full"], help="ephemeris model: 'simple' or 'full' (default: simple)")

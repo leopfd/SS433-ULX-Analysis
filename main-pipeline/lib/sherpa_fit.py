@@ -20,6 +20,9 @@ from lib.physics import ss433_phases
 
 from lib.image_utils import data_extract_quickpos_iter, write_pixelscale, compute_split_rhat
 
+AUTO_STOP_CHECK_INTERVAL = 500
+AUTO_STOP_TAU_FACTOR = 100
+
 from sherpa.astro.ui import (
     load_data, image_close, image_data, load_psf, set_psf, image_psf,
     gauss2d, const2d, set_source, freeze, link, show_model, set_stat,
@@ -140,7 +143,7 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                        background=0, pos_min=(0, 0), pos_max=None, exptime=None, lock_fwhm=True,
                        freeze_components=None, use_mcmc=True, mcmc_iter=5000, mcmc_burn_in_frac=0.2,
                        n_walkers=32, ball_size=1e-4, auto_stop=False, sigma_val=1, 
-                       prefix="g", confirm=True, imgfit=False, progress_chunks=50, progress_queue=None,
+                       prefix="g", confirm=True, imgfit=False, progress_chunks=50, progress_step=None, progress_queue=None,
                        chain_base_dir=None, recalc=False, bin_size=None, signifiers=None, ephemeris=None, date_obs=None):
     """
     Main fitting driver using Sherpa
@@ -423,6 +426,7 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
 
         run_sampler = True
         p0 = None
+        check_interval = AUTO_STOP_CHECK_INTERVAL  # Check convergence every N steps
         
         if not recalc and current_steps > 0:
             if current_steps >= mcmc_iter:
@@ -454,9 +458,12 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                     remaining_steps = mcmc_iter - current_step
                     
                     if remaining_steps > 0:
-                        update_interval = max(1, int(mcmc_iter / progress_chunks))
-                        check_interval = 500  # Check convergence every 500 steps
-                        
+                        if progress_step is not None:
+                            update_interval = max(1, int(progress_step))
+                        else:
+                            update_interval = max(1, int(mcmc_iter / progress_chunks))
+                        if remaining_steps < update_interval:
+                            update_interval = remaining_steps
                         # Iterate step by step to allow interruption and progress reporting
                         for i, sample in enumerate(sampler.sample(p0, iterations=remaining_steps, progress=False)):
                             
@@ -471,7 +478,7 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                                     tau = sampler.get_autocorr_time(tol=0)
                                     
                                     if np.all(np.isfinite(tau)):
-                                        limit = 100 * np.max(tau)
+                                        limit = AUTO_STOP_TAU_FACTOR * np.max(tau)
                                         
                                         if sampler.iteration > limit:
                                             print(f"[{observation}] Converged at step {sampler.iteration} (tau={np.max(tau):.1f}). Stopping early.")
@@ -523,12 +530,14 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                 rhat_vals = [np.nan] * ndim
                 rhat_max = np.nan
 
+            auto_stop_label = "on" if auto_stop else "off"
             conv_str = (
                 f"convergence stats:\n"
                 f"  max autocorr time (tau): {tau_max:.1f} steps\n"
                 f"  max split-rhat:          {rhat_max:.4f} (goal < 1.1)\n"
                 f"  effective samples (ess): {int(ess)}\n"
-                f"  chain length / tau:      {raw_chain.shape[0] / tau_max:.1f} (goal > 50)\n\n"
+                f"  chain length / tau:      {raw_chain.shape[0] / tau_max:.1f} (goal > 50)\n"
+                f"  auto-stop:               {auto_stop_label} (check every {check_interval} steps; stop at > {AUTO_STOP_TAU_FACTOR}*tau)\n\n"
             )
 
             # Determine quantiles for error reporting based on requested sigma
@@ -859,8 +868,8 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
 
 def process_observation(infile, progress_queue, obsid_coords, mcmc_scale_factors, emp_psf_file,
                         n_components_multi, run_mcmc_multi, mcmc_iter_multi,
-                        mcmc_n_walkers, mcmc_ball_size, auto_stop=False, sigma_val=1, progress_chunks=50, recalc=False,
-                        chain_base_dir=None, signifiers=None, ephemeris=None):
+                        mcmc_n_walkers, mcmc_ball_size, auto_stop=False, sigma_val=1, progress_step=None, progress_chunks=50,
+                        recalc=False, chain_base_dir=None, signifiers=None, ephemeris=None):
     """
     Worker function to process a single observation end to end
     Orchestrates the Centroid Fit -> Source Fit -> Multi Component Fit pipeline
@@ -981,8 +990,9 @@ def process_observation(infile, progress_queue, obsid_coords, mcmc_scale_factors
         pos_min=(0, 0), exptime=exptime, confirm=False, 
         use_mcmc=run_mcmc_multi, mcmc_iter=mcmc_iter_multi,
         n_walkers=mcmc_n_walkers, ball_size=mcmc_ball_size,
+        auto_stop=auto_stop,
         sigma_val=sigma_val,
-        progress_chunks=progress_chunks, progress_queue=progress_queue,
+        progress_chunks=progress_chunks, progress_step=progress_step, progress_queue=progress_queue,
         chain_base_dir=chain_base_dir,
         recalc=recalc,
         bin_size=multi_binsize,
