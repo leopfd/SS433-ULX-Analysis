@@ -20,7 +20,10 @@ from lib.physics import ss433_phases
 
 from lib.image_utils import data_extract_quickpos_iter, write_pixelscale, compute_split_rhat
 
-AUTO_STOP_CHECK_INTERVAL = 500
+AUTO_STOP_CHECK_INTERVAL = 200
+AUTO_STOP_TARGET_CHECKS = 1000
+AUTO_STOP_MIN_STEPS = 1000
+AUTO_STOP_THIN_TARGET = 2000
 AUTO_STOP_TAU_FACTOR = 100
 
 from sherpa.astro.ui import (
@@ -426,7 +429,8 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
 
         run_sampler = True
         p0 = None
-        check_interval = AUTO_STOP_CHECK_INTERVAL  # Check convergence every N steps
+        check_interval = max(AUTO_STOP_CHECK_INTERVAL, int(mcmc_iter / AUTO_STOP_TARGET_CHECKS))
+        min_steps_before_check = max(AUTO_STOP_MIN_STEPS, check_interval)
         
         if not recalc and current_steps > 0:
             if current_steps >= mcmc_iter:
@@ -472,16 +476,20 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                                 progress_queue.put(1)
                             
                             # Auto stop logic based on autocorrelation time
-                            if auto_stop and (sampler.iteration % check_interval == 0):
+                            if auto_stop and sampler.iteration >= min_steps_before_check and (sampler.iteration % check_interval == 0):
                                 try:
                                     # Set tol to 0 to prevent crash on short chains
-                                    tau = sampler.get_autocorr_time(tol=0)
+                                    thin = max(1, int(sampler.iteration / AUTO_STOP_THIN_TARGET))
+                                    try:
+                                        tau = sampler.get_autocorr_time(tol=0, thin=thin)
+                                    except TypeError:
+                                        tau = sampler.get_autocorr_time(tol=0)
                                     
                                     if np.all(np.isfinite(tau)):
                                         limit = AUTO_STOP_TAU_FACTOR * np.max(tau)
                                         
                                         if sampler.iteration > limit:
-                                            print(f"[{observation}] Converged at step {sampler.iteration} (tau={np.max(tau):.1f}). Stopping early.")
+                                            print(f"\n[{observation}] Converged at step {sampler.iteration} (tau={np.max(tau):.1f}). Stopping early.")
                                             break
                                 except Exception:
                                     pass

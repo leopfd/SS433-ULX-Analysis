@@ -88,9 +88,8 @@ def run_pipeline():
     # Use spawn context for compatibility across different OS multiprocessing implementations
     ctx = multiprocess.get_context('spawn')
     
-    # Create a manager queue to handle progress updates from child processes
-    manager = ctx.Manager()
-    progress_queue = manager.Queue()
+    # Create a process-safe queue to handle progress updates from child processes
+    progress_queue = ctx.Queue()
     
     # Freeze constant arguments into a partial function to pass to the worker pool
     worker_func = partial(sherpa_fit.process_observation, 
@@ -114,9 +113,13 @@ def run_pipeline():
 
     if run_mcmc:
         auto_stop_label = "on" if config.AUTO_STOP else "off"
+        check_interval = max(
+            sherpa_fit.AUTO_STOP_CHECK_INTERVAL,
+            int(mcmc_iterations / sherpa_fit.AUTO_STOP_TARGET_CHECKS),
+        )
         print(
             f"auto-stop: {auto_stop_label} "
-            f"(check every {sherpa_fit.AUTO_STOP_CHECK_INTERVAL} steps; "
+            f"(check every {check_interval} steps; "
             f"stop at > {sherpa_fit.AUTO_STOP_TAU_FACTOR}*tau)"
         )
 
