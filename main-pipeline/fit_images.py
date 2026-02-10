@@ -3,6 +3,7 @@ import glob
 import time
 import math
 import multiprocess
+import signal
 from functools import partial
 from tqdm import tqdm
 from PIL import Image
@@ -10,6 +11,43 @@ from PIL import Image
 import config
 import lib.sherpa_fit as sherpa_fit
 from lib.arguments import get_pipeline_args
+
+def _update_growing_bar(pbar, min_width=None, max_width=None):
+    if min_width is None:
+        min_width = getattr(config, "PROGRESS_BAR_MIN_WIDTH", 4)
+    if max_width is None:
+        max_width = getattr(config, "PROGRESS_BAR_MAX_WIDTH", 30)
+    try:
+        min_width = max(1, int(min_width))
+        max_width = max(min_width, int(max_width))
+    except Exception:
+        min_width = 4
+        max_width = 30
+
+    total = pbar.total if pbar.total is not None else 0
+    if total <= 0:
+        width = min_width
+    else:
+        frac = pbar.n / total if total else 0.0
+        if frac < 0.0:
+            frac = 0.0
+        elif frac > 1.0:
+            frac = 1.0
+        width = int(round(min_width + (max_width - min_width) * frac))
+        if width < min_width:
+            width = min_width
+        elif width > max_width:
+            width = max_width
+
+    last_width = getattr(pbar, "_grow_bar_width", None)
+    if last_width != width:
+        pbar.bar_format = f"{{l_bar}}\033[1m{{bar:{width}}}\033[0m{{r_bar}}"
+        pbar._grow_bar_width = width
+        pbar.refresh()
+
+def _pbar_update(pbar, n=1):
+    pbar.update(n)
+    _update_growing_bar(pbar)
 
 def compile_pngs_to_pdf(pbar, png_files, pdf_filename):
     if not png_files: return
@@ -54,7 +92,7 @@ def compile_pngs_to_pdf(pbar, png_files, pdf_filename):
                     print(line)
             with open(pdf_filename, "wb") as f:
                 f.write(pdf_bytes)
-            pbar.update(len(png_files))
+            _pbar_update(pbar, len(png_files))
             return
         except Exception as e:
             print(f"warning: img2pdf failed ({e}); falling back to PIL.")
@@ -63,7 +101,7 @@ def compile_pngs_to_pdf(pbar, png_files, pdf_filename):
 
     # Open the first image to establish the base for the PDF file
     img1 = _open_rgb(existing_files[0])
-    pbar.update(1)
+    _pbar_update(pbar, 1)
 
     # Iterate through the rest of the file list and append them
     for png_file in existing_files[1:]:
@@ -71,7 +109,7 @@ def compile_pngs_to_pdf(pbar, png_files, pdf_filename):
             images.append(_open_rgb(png_file))
         except Exception:
             print(f"warning: could not open file {png_file}, skipping.")
-        pbar.update(1)
+        _pbar_update(pbar, 1)
 
     # Save the accumulated images as a single PDF document
     import warnings
@@ -112,7 +150,7 @@ def run_pipeline():
         
         if not event_files:
             print(f"warning: no files matched observation selection: {config.OBS_SELECTION}")
-            return
+            return False
     
     pdf_out_filename = config.FIT_PLOT_PDF
     multi_pdf_out_filename = config.MULTI_FIT_PDF
@@ -133,14 +171,27 @@ def run_pipeline():
 
     # Use spawn context for compatibility across different OS multiprocessing implementations
     ctx = multiprocess.get_context('spawn')
+
+    def _init_worker():
+        # Ignore SIGINT in workers; parent handles Ctrl-C and signals stop_event.
+        import signal
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
     
     # Create a manager queue to handle progress updates from child processes (spawn-safe)
     manager = ctx.Manager()
     progress_queue = manager.Queue()
+    stop_event = manager.Event()
+    interrupt_requested = False
+
+    def _handle_sigint(signum, frame):
+        nonlocal interrupt_requested
+        interrupt_requested = True
+        stop_event.set()
     
     # Freeze constant arguments into a partial function to pass to the worker pool
     worker_func = partial(sherpa_fit.process_observation, 
                           progress_queue=progress_queue,
+                          stop_event=stop_event,
                           obsid_coords=config.OBSID_COORDS, 
                           mcmc_scale_factors={}, 
                           emp_psf_file=config.EMP_PSF_FILE,
@@ -170,10 +221,20 @@ def run_pipeline():
     num_processes = os.cpu_count()
     print(f"starting parallel processing on {num_processes} cores...\n")
     start_total_time = time.time()
-    
     # Execute the worker function across all event files using a process pool
-    with tqdm(total=total_steps, desc="processing observations", bar_format="{l_bar}{r_bar}") as pbar:
-        with ctx.Pool(processes=num_processes) as pool:
+    with tqdm(
+        total=total_steps,
+        desc="processing observations",
+        bar_format="{l_bar}{bar}{r_bar}",
+    ) as pbar:
+        _update_growing_bar(pbar)
+        prev_handler = signal.signal(signal.SIGINT, _handle_sigint)
+        pool = ctx.Pool(
+            processes=num_processes,
+            maxtasksperchild=1,
+            initializer=_init_worker,
+        )
+        try:
             async_result = pool.map_async(worker_func, event_files)
             
             # Poll the worker pool and update the progress bar from the queue until all tasks are done
@@ -185,18 +246,54 @@ def run_pipeline():
                         if delta > 0:
                             pbar.total = max(pbar.n, pbar.total - delta)
                             pbar.refresh()
+                            _update_growing_bar(pbar)
                     elif isinstance(msg, tuple) and len(msg) == 2 and msg[0] == "log":
                         pbar.write(msg[1])
                     else:
                         pbar.update(int(msg))
+                        _update_growing_bar(pbar)
 
             while not async_result.ready():
                 _drain_progress_queue()
+                if interrupt_requested:
+                    raise KeyboardInterrupt()
                 time.sleep(0.1) 
             
             # Ensure any remaining progress updates are processed after the pool finishes
             _drain_progress_queue()
             results = async_result.get()
+        except KeyboardInterrupt:
+            stop_event.set()
+            if pool is not None:
+                pool.close()
+                grace_seconds = getattr(config, "STOP_GRACE_SECONDS", 10)
+                deadline = time.time() + max(0, int(grace_seconds))
+                terminated = False
+                # Wait briefly for workers to flush/close HDF5 before forcing termination.
+                while time.time() < deadline:
+                    try:
+                        alive = [p for p in pool._pool if p.is_alive()]
+                    except Exception:
+                        alive = []
+                    if not alive:
+                        break
+                    time.sleep(0.1)
+                else:
+                    terminated = True
+                if terminated:
+                    pool.terminate()
+                pool.join()
+                pool = None
+            if 'terminated' in locals() and terminated:
+                print("\n\033[1m[pipeline]\033[0m Interrupt received. Workers terminated after grace period; chains may be partial.\n")
+            else:
+                print("\n\033[1m[pipeline]\033[0m Interrupt received. Workers stopped cleanly; partial chains preserved.\n")
+            return False
+        finally:
+            signal.signal(signal.SIGINT, prev_handler)
+            if pool is not None:
+                pool.close()
+                pool.join()
 
     print()
     
@@ -233,7 +330,12 @@ def run_pipeline():
 
     # Compile individual plot images into a single PDF report
     total_plots_to_compile = len(all_pdf_out_files) + len(all_multi_pdf_out_files)
-    with tqdm(total=total_plots_to_compile, desc="compiling pdf plots", bar_format="{l_bar}{r_bar}") as pbar:
+    with tqdm(
+        total=total_plots_to_compile,
+        desc="compiling pdf plots",
+        bar_format="{l_bar}{bar}{r_bar}",
+    ) as pbar:
+        _update_growing_bar(pbar)
         try:
             compile_pngs_to_pdf(pbar, all_pdf_out_files, pdf_out_filename)
         except Exception as e:
@@ -254,6 +356,7 @@ def run_pipeline():
             print(f"\nwarning: could not remove {f}: {e}")
 
     print('\nprocess complete')
+    return True
 
 if __name__ == '__main__':
     args = get_pipeline_args()
