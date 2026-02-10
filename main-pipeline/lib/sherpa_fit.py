@@ -40,6 +40,124 @@ from ciao_contrib.runtool import dmcopy, reproject_image
 # Suppress standard Sherpa information messages to keep logs clean
 logging.getLogger("sherpa").setLevel(logging.WARNING)
 
+class BufferedHDFBackend(HDFBackend):
+    """
+    HDF5 backend that buffers steps in memory and writes them in chunks.
+    This reduces HDF5 open/write frequency while keeping the same on-disk format.
+    """
+    def __init__(self, filename, name="mcmc", read_only=False, dtype=None,
+                 compression=None, compression_opts=None, buffer_size=1000):
+        super().__init__(
+            filename,
+            name=name,
+            read_only=read_only,
+            dtype=dtype,
+            compression=compression,
+            compression_opts=compression_opts,
+        )
+        self.buffer_size = max(1, int(buffer_size))
+        self._buffer_chain = None
+        self._buffer_log_prob = None
+        self._buffer_blobs = None
+        self._buffer_accepted = None
+        self._buffer_random_state = None
+        self._buffer_idx = 0
+        self._file_iteration_cache = None
+
+    def reset(self, nwalkers, ndim):
+        super().reset(nwalkers, ndim)
+        self._file_iteration_cache = 0
+        self._init_buffers(nwalkers, ndim, None)
+
+    def _init_buffers(self, nwalkers, ndim, blobs):
+        self._buffer_chain = np.empty((self.buffer_size, nwalkers, ndim), dtype=self.dtype)
+        self._buffer_log_prob = np.empty((self.buffer_size, nwalkers), dtype=self.dtype)
+        self._buffer_accepted = np.zeros(nwalkers, dtype=self.dtype)
+        self._buffer_idx = 0
+        if blobs is not None:
+            dt = np.dtype((blobs.dtype, blobs.shape[1:]))
+            self._buffer_blobs = np.empty((self.buffer_size, nwalkers), dtype=dt)
+        else:
+            self._buffer_blobs = None
+
+    def _ensure_buffers(self, state):
+        if self._buffer_chain is not None:
+            return
+        nwalkers, ndim = state.coords.shape
+        self._init_buffers(nwalkers, ndim, state.blobs)
+        if self._file_iteration_cache is None:
+            try:
+                with self.open() as f:
+                    if self.name in f:
+                        self._file_iteration_cache = f[self.name].attrs["iteration"]
+                    else:
+                        self._file_iteration_cache = 0
+            except Exception:
+                self._file_iteration_cache = 0
+
+    @property
+    def iteration(self):
+        if self._file_iteration_cache is None:
+            try:
+                with self.open() as f:
+                    if self.name in f:
+                        self._file_iteration_cache = f[self.name].attrs["iteration"]
+                    else:
+                        self._file_iteration_cache = 0
+            except Exception:
+                self._file_iteration_cache = 0
+        return int(self._file_iteration_cache) + int(self._buffer_idx)
+
+    def flush(self):
+        if self._buffer_idx <= 0:
+            return
+        try:
+            with self.open("a") as f:
+                g = f[self.name]
+                start = g.attrs["iteration"]
+                end = start + self._buffer_idx
+                g["chain"][start:end, :, :] = self._buffer_chain[: self._buffer_idx]
+                g["log_prob"][start:end, :] = self._buffer_log_prob[: self._buffer_idx]
+                if self._buffer_blobs is not None:
+                    if "blobs" not in g:
+                        nwalkers = g.attrs["nwalkers"]
+                        dt = self._buffer_blobs.dtype
+                        g.create_dataset(
+                            "blobs",
+                            (g["chain"].shape[0], nwalkers),
+                            maxshape=(None, nwalkers),
+                            dtype=dt,
+                            compression=self.compression,
+                            compression_opts=self.compression_opts,
+                        )
+                    g["blobs"][start:end, :] = self._buffer_blobs[: self._buffer_idx]
+                g["accepted"][:] += self._buffer_accepted
+                if self._buffer_random_state is not None:
+                    for i, v in enumerate(self._buffer_random_state):
+                        g.attrs[f"random_state_{i}"] = v
+                g.attrs["iteration"] = end
+            self._file_iteration_cache = end
+        finally:
+            if self._buffer_accepted is not None:
+                self._buffer_accepted[:] = 0
+            self._buffer_idx = 0
+
+    def save_step(self, state, accepted):
+        self._check(state, accepted)
+        self._ensure_buffers(state)
+        if state.blobs is not None and self._buffer_blobs is None:
+            raise ValueError("inconsistent use of blobs in buffered backend")
+        idx = self._buffer_idx
+        self._buffer_chain[idx, :, :] = state.coords
+        self._buffer_log_prob[idx, :] = state.log_prob
+        if state.blobs is not None:
+            self._buffer_blobs[idx, :] = state.blobs
+        self._buffer_accepted += accepted
+        self._buffer_random_state = state.random_state
+        self._buffer_idx += 1
+        if self._buffer_idx >= self.buffer_size:
+            self.flush()
+
 def src_psf_images(obsid, infile, x0, y0, diameter, wcs_ra, wcs_dec, binsize=0.25, shape='square', psfimg=True, showimg=False, empirical_psf=None):
     """
     Extracts a region around the source and optionally prepares an empirical PSF
@@ -148,7 +266,8 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                        freeze_components=None, use_mcmc=True, mcmc_iter=5000, mcmc_burn_in_frac=0.2,
                        n_walkers=32, ball_size=1e-4, auto_stop=False, sigma_val=1,
                        prefix="g", confirm=True, imgfit=False, progress_chunks=50, progress_step=None, progress_queue=None,
-                       chain_base_dir=None, recalc=False, bin_size=None, signifiers=None, ephemeris=None, date_obs=None):
+                       chain_base_dir=None, recalc=False, bin_size=None, signifiers=None, ephemeris=None, date_obs=None,
+                       stop_event=None):
     """
     Main fitting driver using Sherpa
     Sets up a 2D Gaussian model (single or multi component), fits using optimization algorithms,
@@ -309,80 +428,98 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
         mcmc_start_time = time.time()
         ndim = len(thawed_pars)
         
+        log_prob_error_count = 0
+        interrupt_requested = False
+
         # Define the Log Probability function for MCMC
         # This includes standard parameter bounds and the custom geometric priors
         def log_probability(theta):
-            # Check standard Sherpa parameter bounds (hard limits)
-            for param, value in zip(thawed_pars, theta):
-                if value < param.min or value > param.max:
-                    return -np.inf
-
-            # Apply label independent priors for 26575 4 component fit
-            # This logic dynamically assigns "Core", "East", and "West" labels based on position
-            # allowing the sampler to swap identities if needed to find the global optimum
-            if geom_prior_cfg is not None:
-                cfg = geom_prior_cfg
-
-                # Extract all coordinate pairs from the current sample theta
-                pts = [(theta[xi], theta[yi]) for (xi, yi) in cfg["xy_idx"]]
-
-                # Identify the core as the component closest to the image center
-                d2 = [(x - cfg["x_ctr"])**2 + (y - cfg["y_ctr"])**2 for (x, y) in pts]
-                icore = int(np.argmin(d2))
-                x_core, y_core = pts[icore]
-
-                # Classify remaining components as East or West and enforce separation from the core
-                east = []
-                west = []
-                for j, (x, y) in enumerate(pts):
-                    if j == icore:
-                        continue
-
-                    # Ensure no jet overlaps the core position
-                    if np.hypot(x - x_core, y - y_core) < cfg["r_min"]:
+            nonlocal log_prob_error_count, interrupt_requested
+            if interrupt_requested:
+                return -np.inf
+            if stop_event is not None and stop_event.is_set():
+                interrupt_requested = True
+                return -np.inf
+            try:
+                # Check standard Sherpa parameter bounds (hard limits)
+                for param, value in zip(thawed_pars, theta):
+                    if value < param.min or value > param.max:
                         return -np.inf
 
-                    # Classify side based on X position relative to core (HRC coordinates)
-                    if x < x_core - cfg["x_gap"]:
-                        east.append((x, y))
-                    elif x > x_core + cfg["x_gap"]:
-                        west.append((x, y))
-                    else:
-                        return -np.inf
+                # Apply label independent priors for 26575 4 component fit
+                # This logic dynamically assigns "Core", "East", and "West" labels based on position
+                # allowing the sampler to swap identities if needed to find the global optimum
+                if geom_prior_cfg is not None:
+                    cfg = geom_prior_cfg
 
-                # Enforce component split constraints
-                # We expect either 2 East 1 West or 1 East 2 West configuration
-                if not ((len(east) == 2 and len(west) == 1) or (len(east) == 1 and len(west) == 2)):
-                    return -np.inf
+                    # Extract all coordinate pairs from the current sample theta
+                    pts = [(theta[xi], theta[yi]) for (xi, yi) in cfg["xy_idx"]]
 
-                # Check for non overlap among all jets using pairwise separation
-                jets = east + west
-                for a in range(len(jets)):
-                    xa, ya = jets[a]
-                    for b in range(a + 1, len(jets)):
-                        xb, yb = jets[b]
-                        if np.hypot(xa - xb, ya - yb) < cfg["d_min"]:
+                    # Identify the core as the component closest to the image center
+                    d2 = [(x - cfg["x_ctr"])**2 + (y - cfg["y_ctr"])**2 for (x, y) in pts]
+                    icore = int(np.argmin(d2))
+                    x_core, y_core = pts[icore]
+
+                    # Classify remaining components as East or West and enforce separation from the core
+                    east = []
+                    west = []
+                    for j, (x, y) in enumerate(pts):
+                        if j == icore:
+                            continue
+
+                        # Ensure no jet overlaps the core position
+                        if np.hypot(x - x_core, y - y_core) < cfg["r_min"]:
                             return -np.inf
 
-                # Enforce spatial ordering within the East side
-                # Inner component is closer to core so it has a larger X because East is left
-                east_sorted_x = sorted([x for (x, _) in east], reverse=True)
-                for k in range(len(east_sorted_x) - 1):
-                    if (east_sorted_x[k] - east_sorted_x[k + 1]) < cfg["dx_min"]:
+                        # Classify side based on X position relative to core (HRC coordinates)
+                        if x < x_core - cfg["x_gap"]:
+                            east.append((x, y))
+                        elif x > x_core + cfg["x_gap"]:
+                            west.append((x, y))
+                        else:
+                            return -np.inf
+
+                    # Enforce component split constraints
+                    # We expect either 2 East 1 West or 1 East 2 West configuration
+                    if not ((len(east) == 2 and len(west) == 1) or (len(east) == 1 and len(west) == 2)):
                         return -np.inf
 
-                # Enforce spatial ordering within the West side
-                # Inner component is closer to core so it has a smaller X
-                west_sorted_x = sorted([x for (x, _) in west])
-                for k in range(len(west_sorted_x) - 1):
-                    if (west_sorted_x[k + 1] - west_sorted_x[k]) < cfg["dx_min"]:
-                        return -np.inf
+                    # Check for non overlap among all jets using pairwise separation
+                    jets = east + west
+                    for a in range(len(jets)):
+                        xa, ya = jets[a]
+                        for b in range(a + 1, len(jets)):
+                            xb, yb = jets[b]
+                            if np.hypot(xa - xb, ya - yb) < cfg["d_min"]:
+                                return -np.inf
 
-            # If all checks pass set Sherpa parameters and compute the C statistic
-            # Return -0.5 * CSTAT as the log likelihood
-            for param, value in zip(thawed_pars, theta):
-                param.val = value
-            return -0.5 * calc_stat()
+                    # Enforce spatial ordering within the East side
+                    # Inner component is closer to core so it has a larger X because East is left
+                    east_sorted_x = sorted([x for (x, _) in east], reverse=True)
+                    for k in range(len(east_sorted_x) - 1):
+                        if (east_sorted_x[k] - east_sorted_x[k + 1]) < cfg["dx_min"]:
+                            return -np.inf
+
+                    # Enforce spatial ordering within the West side
+                    # Inner component is closer to core so it has a smaller X
+                    west_sorted_x = sorted([x for (x, _) in west])
+                    for k in range(len(west_sorted_x) - 1):
+                        if (west_sorted_x[k + 1] - west_sorted_x[k]) < cfg["dx_min"]:
+                            return -np.inf
+
+                # If all checks pass set Sherpa parameters and compute the C statistic
+                # Return -0.5 * CSTAT as the log likelihood
+                for param, value in zip(thawed_pars, theta):
+                    param.val = value
+                return -0.5 * calc_stat()
+            except KeyboardInterrupt:
+                interrupt_requested = True
+                if stop_event is not None:
+                    stop_event.set()
+                return -np.inf
+            except Exception:
+                log_prob_error_count += 1
+                return -np.inf
 
         current_n_walkers = n_walkers if n_walkers >= 2 * ndim else 2 * ndim + 2
         
@@ -418,8 +555,51 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
         chain_dir = os.path.join(chain_base_dir, param_folder_name)
         os.makedirs(chain_dir, exist_ok=True)
         chain_filename = os.path.join(chain_dir, f"{observation}_chain.h5")
-        
-        backend = HDFBackend(chain_filename, compression="gzip", compression_opts=4)
+
+        chunk_size = max(1000, int(math.ceil(mcmc_iter / 100)))
+        backend = BufferedHDFBackend(
+            chain_filename,
+            compression="gzip",
+            compression_opts=4,
+            buffer_size=chunk_size,
+        )
+
+        def _reset_corrupt_chain(reason):
+            msg = (f"\033[1m[{observation}]\033[0m Corrupted chain detected ({reason}). "
+                   "Deleting and restarting from scratch.")
+            if progress_queue:
+                progress_queue.put(("log", msg))
+            else:
+                print(msg)
+            try:
+                if hasattr(backend, "flush"):
+                    backend.flush()
+            except Exception:
+                pass
+            try:
+                backend._file.flush()
+            except Exception:
+                pass
+            try:
+                backend._file.close()
+            except Exception:
+                pass
+            try:
+                os.remove(chain_filename)
+            except Exception as e:
+                warn = f"\033[1m[{observation}]\033[0m warning: could not remove chain file: {e}"
+                if progress_queue:
+                    progress_queue.put(("log", warn))
+                else:
+                    print(warn)
+            new_backend = BufferedHDFBackend(
+                chain_filename,
+                compression="gzip",
+                compression_opts=4,
+                buffer_size=chunk_size,
+            )
+            new_backend.reset(current_n_walkers, ndim)
+            return new_backend
 
         # Check for existing chain to resume
         current_steps = 0
@@ -434,11 +614,33 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
         min_steps_before_check = max(AUTO_STOP_MIN_STEPS, check_interval)
         
         if not recalc and current_steps > 0:
+            if hasattr(backend, "get_chain"):
+                try:
+                    _ = backend.get_chain(discard=max(current_steps - 1, 0), flat=False, thin=1)
+                except Exception as e:
+                    backend = _reset_corrupt_chain(f"resume check failed: {e}")
+                    current_steps = 0
             if current_steps >= mcmc_iter:
-                print(f"\033[1m[{observation}]\033[0m Found complete chain ({current_steps} steps). Skipping fit.")
+                msg = f"\033[1m[{observation}]\033[0m Found complete chain ({current_steps} steps). Skipping fit."
+                if progress_queue:
+                    progress_queue.put(("log", msg))
+                else:
+                    print(msg)
                 run_sampler = False
+                if progress_queue:
+                    if progress_step is not None:
+                        update_interval = max(1, int(progress_step))
+                    else:
+                        update_interval = max(1, int(mcmc_iter / progress_chunks))
+                    expected_ticks = math.ceil(mcmc_iter / update_interval)
+                    if expected_ticks > 0:
+                        progress_queue.put(expected_ticks)
             else:
-                print(f"\033[1m[{observation}]\033[0m Found partial chain ({current_steps}/{mcmc_iter} steps). Resuming...")
+                msg = f"\033[1m[{observation}]\033[0m Found partial chain ({current_steps}/{mcmc_iter} steps). Resuming..."
+                if progress_queue:
+                    progress_queue.put(("log", msg))
+                else:
+                    print(msg)
                 p0 = None # Resumes automatically from backend state
         
         elif recalc and current_steps > 0:
@@ -454,7 +656,13 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
             for i, param in enumerate(thawed_pars):
                 p0[:, i] = np.clip(p0[:, i], param.min + 1e-6, param.max - 1e-6)
 
+        stop_requested = False
         try:
+            try:
+                import signal
+                signal.signal(signal.SIGINT, signal.SIG_IGN)
+            except Exception:
+                pass
             sampler = emcee.EnsembleSampler(current_n_walkers, ndim, log_probability, backend=backend)
             
             if run_sampler:
@@ -477,35 +685,54 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                                 progress_queue.put(prev_ticks)
                                 ticks_sent += prev_ticks
                         # Iterate step by step to allow interruption and progress reporting
-                        for i, sample in enumerate(sampler.sample(p0, iterations=remaining_steps, progress=False)):
-                            
-                            # Update global progress bar via queue
-                            if progress_queue and (i + 1) % update_interval == 0:
-                                progress_queue.put(1)
-                                ticks_sent += 1
-                            
-                            # Auto stop logic based on autocorrelation time
-                            if auto_stop and sampler.iteration >= min_steps_before_check and (sampler.iteration % check_interval == 0):
-                                try:
-                                    # Set tol to 0 to prevent crash on short chains
-                                    thin = max(1, int(sampler.iteration / AUTO_STOP_THIN_TARGET))
+                        try:
+                            for i, sample in enumerate(sampler.sample(p0, iterations=remaining_steps, progress=False)):
+                                
+                                if stop_event is not None and stop_event.is_set():
+                                    stop_requested = True
+                                    msg = f"\033[1m[{observation}]\033[0m Stop requested. Closing chain at step {sampler.iteration}."
+                                    if progress_queue:
+                                        progress_queue.put(("log", msg))
+                                    else:
+                                        print(f"\n{msg}")
+                                    break
+                                
+                                # Update global progress bar via queue
+                                if progress_queue and (i + 1) % update_interval == 0:
+                                    progress_queue.put(1)
+                                    ticks_sent += 1
+                                
+                                # Auto stop logic based on autocorrelation time
+                                if auto_stop and sampler.iteration >= min_steps_before_check and (sampler.iteration % check_interval == 0):
                                     try:
-                                        tau = sampler.get_autocorr_time(tol=0, thin=thin)
-                                    except TypeError:
-                                        tau = sampler.get_autocorr_time(tol=0)
-                                    
-                                    if np.all(np.isfinite(tau)):
-                                        limit = AUTO_STOP_TAU_FACTOR * np.max(tau)
+                                        # Set tol to 0 to prevent crash on short chains
+                                        thin = max(1, int(sampler.iteration / AUTO_STOP_THIN_TARGET))
+                                        try:
+                                            tau = sampler.get_autocorr_time(tol=0, thin=thin)
+                                        except TypeError:
+                                            tau = sampler.get_autocorr_time(tol=0)
                                         
-                                        if sampler.iteration > limit:
-                                            msg = f"\033[1m[{observation}]\033[0m Converged at step {sampler.iteration} (tau={np.max(tau):.1f}). Stopping early."
-                                            if progress_queue:
-                                                progress_queue.put(("log", msg))
-                                            else:
-                                                print(f"\n{msg}")
-                                            break
-                                except Exception:
-                                    pass
+                                        if np.all(np.isfinite(tau)):
+                                            limit = AUTO_STOP_TAU_FACTOR * np.max(tau)
+                                            
+                                            if sampler.iteration > limit:
+                                                msg = f"\033[1m[{observation}]\033[0m Converged at step {sampler.iteration} (tau={np.max(tau):.1f}). Stopping early."
+                                                if progress_queue:
+                                                    progress_queue.put(("log", msg))
+                                                else:
+                                                    print(f"\n{msg}")
+                                                break
+                                    except Exception:
+                                        pass
+                        except KeyboardInterrupt:
+                            stop_requested = True
+                            if stop_event is not None:
+                                stop_event.set()
+                            msg = f"\033[1m[{observation}]\033[0m Stop requested. Closing chain at step {sampler.iteration}."
+                            if progress_queue:
+                                progress_queue.put(("log", msg))
+                            else:
+                                print(f"\n{msg}")
                         if progress_queue and update_interval > 0:
                             end_iter = sampler.iteration
                             expected_ticks = math.ceil(mcmc_iter / update_interval)
@@ -517,7 +744,41 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                                 progress_queue.put(("adjust_total", expected_ticks - actual_ticks))
                         
                 except Exception as e:
-                    print(f"  error (obsid {observation}) sampler crashed: {e}")
+                    msg = f"  error (obsid {observation}) sampler crashed: {e}"
+                    if progress_queue:
+                        progress_queue.put(("log", msg))
+                    else:
+                        print(msg)
+
+            try:
+                if hasattr(backend, "flush"):
+                    backend.flush()
+            except Exception:
+                pass
+
+            if log_prob_error_count:
+                msg = (f"\033[1m[{observation}]\033[0m "
+                       f"{log_prob_error_count} likelihood exceptions (treated as -inf).")
+                if progress_queue:
+                    progress_queue.put(("log", msg))
+                else:
+                    print(msg)
+
+            if stop_requested:
+                try:
+                    if hasattr(backend, "flush"):
+                        backend.flush()
+                except Exception:
+                    pass
+                try:
+                    backend._file.flush()
+                except Exception:
+                    pass
+                try:
+                    backend._file.close()
+                except Exception:
+                    pass
+                return None, None, None, None
             
             # Post Processing: Calculate burn in and statistics
             try:
@@ -730,7 +991,11 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                                 ax.scatter([core_x], [core_y], marker='+', color='white', s=100, zorder=30, label=None)
 
                             except Exception as e:
-                                print(f"Warning: Could not overlay jet model: {e}")
+                                msg = f"Warning: Could not overlay jet model: {e}"
+                                if progress_queue:
+                                    progress_queue.put(("log", msg))
+                                else:
+                                    print(msg)
 
                         bf_x = best_fit_values[x_idx]; bf_y = best_fit_values[y_idx]
                         bf_label = "Best Fit" if not best_label_used else "_nolegend_"
@@ -904,7 +1169,7 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     return summary_output, fig, corner_fig, walker_map_fig
 
-def process_observation(infile, progress_queue, obsid_coords, mcmc_scale_factors, emp_psf_file,
+def process_observation(infile, progress_queue, stop_event, obsid_coords, mcmc_scale_factors, emp_psf_file,
                         n_components_multi, run_mcmc_multi, mcmc_iter_multi,
                         mcmc_n_walkers, mcmc_ball_size, auto_stop=False,
                         sigma_val=1, progress_step=None, progress_chunks=50, recalc=False,
@@ -917,6 +1182,12 @@ def process_observation(infile, progress_queue, obsid_coords, mcmc_scale_factors
     pdf_out_files = []
     multi_pdf_out_files = []
     
+    try:
+        import signal
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except Exception:
+        pass
+
     obsid = os.path.dirname(os.path.dirname(infile))
     # Seed random generator deterministically using the Observation ID
     try:
@@ -1037,7 +1308,8 @@ def process_observation(infile, progress_queue, obsid_coords, mcmc_scale_factors
         bin_size=multi_binsize,
         signifiers=signifiers,
         ephemeris=ephemeris,
-        date_obs=date
+        date_obs=date,
+        stop_event=stop_event
     )
 
     if multi_fit_summary is None:
