@@ -4,6 +4,7 @@ import time
 import math
 import multiprocess
 import signal
+import shutil
 from functools import partial
 from tqdm import tqdm
 from PIL import Image
@@ -12,42 +13,11 @@ import config
 import lib.sherpa_fit as sherpa_fit
 from lib.arguments import get_pipeline_args
 
-def _update_growing_bar(pbar, min_width=None, max_width=None):
-    if min_width is None:
-        min_width = getattr(config, "PROGRESS_BAR_MIN_WIDTH", 4)
-    if max_width is None:
-        max_width = getattr(config, "PROGRESS_BAR_MAX_WIDTH", 30)
-    try:
-        min_width = max(1, int(min_width))
-        max_width = max(min_width, int(max_width))
-    except Exception:
-        min_width = 4
-        max_width = 30
-
-    total = pbar.total if pbar.total is not None else 0
-    if total <= 0:
-        width = min_width
-    else:
-        frac = pbar.n / total if total else 0.0
-        if frac < 0.0:
-            frac = 0.0
-        elif frac > 1.0:
-            frac = 1.0
-        width = int(round(min_width + (max_width - min_width) * frac))
-        if width < min_width:
-            width = min_width
-        elif width > max_width:
-            width = max_width
-
-    last_width = getattr(pbar, "_grow_bar_width", None)
-    if last_width != width:
-        pbar.bar_format = f"{{l_bar}}\033[1m{{bar:{width}}}\033[0m{{r_bar}}"
-        pbar._grow_bar_width = width
-        pbar.refresh()
-
-def _pbar_update(pbar, n=1):
-    pbar.update(n)
-    _update_growing_bar(pbar)
+def _fixed_bar_format():
+    cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+    # Reserve space for description + stats; clamp to a reasonable width.
+    width = max(24, min(60, cols - 40))
+    return f"{{l_bar}}\033[1m{{bar:{width}}}\033[0m{{r_bar}}"
 
 def compile_pngs_to_pdf(pbar, png_files, pdf_filename):
     if not png_files: return
@@ -92,7 +62,7 @@ def compile_pngs_to_pdf(pbar, png_files, pdf_filename):
                     print(line)
             with open(pdf_filename, "wb") as f:
                 f.write(pdf_bytes)
-            _pbar_update(pbar, len(png_files))
+            pbar.update(len(png_files))
             return
         except Exception as e:
             print(f"warning: img2pdf failed ({e}); falling back to PIL.")
@@ -101,7 +71,7 @@ def compile_pngs_to_pdf(pbar, png_files, pdf_filename):
 
     # Open the first image to establish the base for the PDF file
     img1 = _open_rgb(existing_files[0])
-    _pbar_update(pbar, 1)
+    pbar.update(1)
 
     # Iterate through the rest of the file list and append them
     for png_file in existing_files[1:]:
@@ -109,7 +79,7 @@ def compile_pngs_to_pdf(pbar, png_files, pdf_filename):
             images.append(_open_rgb(png_file))
         except Exception:
             print(f"warning: could not open file {png_file}, skipping.")
-        _pbar_update(pbar, 1)
+        pbar.update(1)
 
     # Save the accumulated images as a single PDF document
     import warnings
@@ -225,9 +195,8 @@ def run_pipeline():
     with tqdm(
         total=total_steps,
         desc="processing observations",
-        bar_format="{l_bar}{bar}{r_bar}",
+        bar_format=_fixed_bar_format(),
     ) as pbar:
-        _update_growing_bar(pbar)
         prev_handler = signal.signal(signal.SIGINT, _handle_sigint)
         pool = ctx.Pool(
             processes=num_processes,
@@ -246,12 +215,10 @@ def run_pipeline():
                         if delta > 0:
                             pbar.total = max(pbar.n, pbar.total - delta)
                             pbar.refresh()
-                            _update_growing_bar(pbar)
                     elif isinstance(msg, tuple) and len(msg) == 2 and msg[0] == "log":
                         pbar.write(msg[1])
                     else:
                         pbar.update(int(msg))
-                        _update_growing_bar(pbar)
 
             while not async_result.ready():
                 _drain_progress_queue()
@@ -333,9 +300,8 @@ def run_pipeline():
     with tqdm(
         total=total_plots_to_compile,
         desc="compiling pdf plots",
-        bar_format="{l_bar}{bar}{r_bar}",
+        bar_format=_fixed_bar_format(),
     ) as pbar:
-        _update_growing_bar(pbar)
         try:
             compile_pngs_to_pdf(pbar, all_pdf_out_files, pdf_out_filename)
         except Exception as e:
