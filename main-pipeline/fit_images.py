@@ -38,8 +38,22 @@ def compile_pngs_to_pdf(pbar, png_files, pdf_filename):
 
     if img2pdf is not None:
         try:
+            import warnings
+            import contextlib
+            import io
+            stderr_buf = io.StringIO()
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="Image contains an alpha channel.*")
+                with contextlib.redirect_stderr(stderr_buf):
+                    pdf_bytes = img2pdf.convert(existing_files)
+            # Surface any non-alpha warnings from stderr
+            for line in stderr_buf.getvalue().splitlines():
+                if "Image contains an alpha channel" in line:
+                    continue
+                if line.strip():
+                    print(line)
             with open(pdf_filename, "wb") as f:
-                f.write(img2pdf.convert(existing_files))
+                f.write(pdf_bytes)
             pbar.update(len(png_files))
             return
         except Exception as e:
@@ -150,11 +164,8 @@ def run_pipeline():
             sherpa_fit.AUTO_STOP_CHECK_INTERVAL,
             int(mcmc_iterations / sherpa_fit.AUTO_STOP_TARGET_CHECKS),
         )
-        print(
-            f"auto-stop: {auto_stop_label} "
-            f"(check every {check_interval} steps; "
-            f"stop at > {sherpa_fit.AUTO_STOP_TAU_FACTOR}*tau)"
-        )
+        tau_factor = f"{sherpa_fit.AUTO_STOP_TAU_FACTOR}×τ"
+        print(f"Auto-stop is {auto_stop_label}. Chain will stop when steps are greater than {tau_factor}...")
 
     num_processes = os.cpu_count()
     print(f"starting parallel processing on {num_processes} cores...\n")
@@ -174,6 +185,8 @@ def run_pipeline():
                         if delta > 0:
                             pbar.total = max(pbar.n, pbar.total - delta)
                             pbar.refresh()
+                    elif isinstance(msg, tuple) and len(msg) == 2 and msg[0] == "log":
+                        pbar.write(msg[1])
                     else:
                         pbar.update(int(msg))
 

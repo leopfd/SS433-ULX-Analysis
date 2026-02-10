@@ -16,7 +16,7 @@ def plot_swift_comparison(tracker_df, ejection_df):
     It keeps the original Swift text parsing to avoid breaking existing file formats
     """
 
-    print("[Swift Plot] Generating Comparison Plot...")
+    print("\033[1m[Swift Plot]\033[0m Generating Comparison Plot...")
 
     if not os.path.exists(config.SWIFT_FILE):
         print(f"Error: Swift data file not found at {config.get_rel_path(config.SWIFT_FILE)}")
@@ -28,7 +28,7 @@ def plot_swift_comparison(tracker_df, ejection_df):
             ejection_df = ejection_df.copy()
             ejection_df['ejection_mjd'] = ejection_df['mjd'] - ejection_df['travel_time_days']
         else:
-            print("[Swift Plot] Error: 'travel_time_days' missing from ejection dataframe.")
+            print("\033[1m[Swift Plot]\033[0m Error: 'travel_time_days' missing from ejection dataframe.")
             return
 
     # Core emission time for reflected light: observed MJD minus core->knot light-travel time
@@ -82,7 +82,7 @@ def plot_swift_comparison(tracker_df, ejection_df):
     )
 
     if plot_df.empty:
-        print("[Swift Plot] Warning: Merge resulted in empty dataframe.")
+        print("\033[1m[Swift Plot]\033[0m Warning: Merge resulted in empty dataframe.")
         return
 
     if 'method' in plot_df.columns:
@@ -115,7 +115,7 @@ def plot_swift_comparison(tracker_df, ejection_df):
         pass
 
     if not swift_list:
-        print("[Swift Plot] Error: No valid Swift data loaded.")
+        print("\033[1m[Swift Plot]\033[0m Error: No valid Swift data loaded.")
         return
 
     swift_arr = np.array(swift_list)
@@ -179,8 +179,8 @@ def plot_swift_comparison(tracker_df, ejection_df):
         g3_data_all = plot_df[west_mask].copy()
 
         if g2_data_all.empty and g3_data_all.empty:
-            print("[Swift Plot] Warning: No east/west components found in merged table.")
-            print("[Swift Plot] Components present:", sorted(plot_df['component'].astype(str).unique()))
+            print("\033[1m[Swift Plot]\033[0m Warning: No east/west components found in merged table.")
+            print("\033[1m[Swift Plot]\033[0m Components present:", sorted(plot_df['component'].astype(str).unique()))
             return
 
         obs_min = plot_df["mjd"].min() if "mjd" in plot_df.columns else plot_df["ejection_mjd"].min()

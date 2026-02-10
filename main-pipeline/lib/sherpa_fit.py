@@ -435,10 +435,10 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
         
         if not recalc and current_steps > 0:
             if current_steps >= mcmc_iter:
-                print(f"[{observation}] Found complete chain ({current_steps} steps). Skipping fit.")
+                print(f"\033[1m[{observation}]\033[0m Found complete chain ({current_steps} steps). Skipping fit.")
                 run_sampler = False
             else:
-                print(f"[{observation}] Found partial chain ({current_steps}/{mcmc_iter} steps). Resuming...")
+                print(f"\033[1m[{observation}]\033[0m Found partial chain ({current_steps}/{mcmc_iter} steps). Resuming...")
                 p0 = None # Resumes automatically from backend state
         
         elif recalc and current_steps > 0:
@@ -498,7 +498,11 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                                         limit = AUTO_STOP_TAU_FACTOR * np.max(tau)
                                         
                                         if sampler.iteration > limit:
-                                            print(f"\n[{observation}] Converged at step {sampler.iteration} (tau={np.max(tau):.1f}). Stopping early.")
+                                            msg = f"\033[1m[{observation}]\033[0m Converged at step {sampler.iteration} (tau={np.max(tau):.1f}). Stopping early."
+                                            if progress_queue:
+                                                progress_queue.put(("log", msg))
+                                            else:
+                                                print(f"\n{msg}")
                                             break
                                 except Exception:
                                     pass

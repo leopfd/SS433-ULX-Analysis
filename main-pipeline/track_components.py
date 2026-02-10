@@ -18,7 +18,7 @@ def run_tracker_analysis():
         try:
             df = pd.read_csv(config.TRACKER_TABLE_CSV)
         except Exception as e:
-            print(f"[ERROR] Failed to read CSV: {e}")
+            print(f"\033[1m[ERROR]\033[0m Failed to read CSV: {e}")
             raise
             
     else:

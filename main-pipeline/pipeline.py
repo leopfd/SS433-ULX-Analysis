@@ -40,7 +40,7 @@ def _normalize_skip_stages(args):
     for raw in args.skip_stages:
         key = aliases.get(str(raw).lower())
         if not key:
-            print(f"[pipeline] Warning: unknown stage '{raw}' in --skip-stages; ignoring.")
+            print(f"\033[1m[pipeline]\033[0m Warning: unknown stage '{raw}' in --skip-stages; ignoring.")
             continue
         skip.add(key)
     return skip
@@ -49,7 +49,7 @@ def _normalize_skip_stages(args):
 def run(args=None):
     skip_stages = _normalize_skip_stages(args)
 
-    print("starting ss433 analysis pipeline...")
+    print("\033[1mstarting ss433 analysis pipeline...\033[0m")
     if skip_stages:
         print(f"skipping stages: {', '.join(sorted(skip_stages))}")
     print(f"id: {config.FILE_ID}\n")
@@ -59,18 +59,18 @@ def run(args=None):
     # Stage 1 Image Fitting
     # Processes raw observation files to fit spatial models and extract component centroids
     if "fit" in skip_stages:
-        print("\n=== stage 1: fitting images (skipped) ===\n")
+        print("\n\033[1m=== stage 1: fitting images (skipped) ===\033[0m\n")
     else:
-        print("\n=== stage 1: fitting images ===\n")
+        print("\n\033[1m=== stage 1: fitting images ===\033[0m\n")
         fit_images.run_pipeline()
     
     # Stage 2 Component Tracking
     # Aggregates individual fit results to track component movement over time
     if "track" in skip_stages:
-        print("\n=== stage 2: tracking components (skipped) ===\n")
+        print("\n\033[1m=== stage 2: tracking components (skipped) ===\033[0m\n")
         tracker_df = None
     else:
-        print("\n=== stage 2: tracking components ===\n")
+        print("\n\033[1m=== stage 2: tracking components ===\033[0m\n")
         tracker_df = track_components.run_tracker_analysis()
 
     needs_tracker = "kinematics" not in skip_stages
@@ -81,10 +81,10 @@ def run(args=None):
     # Stage 3 Kinematic Fitting
     # Uses the tracked component trajectories to model jet kinematics and ejection dates
     if "kinematics" in skip_stages:
-        print("\n=== stage 3: kinematic fitting (skipped) ===\n")
+        print("\n\033[1m=== stage 3: kinematic fitting (skipped) ===\033[0m\n")
         ejection_df = None
     else:
-        print("\n=== stage 3: kinematic fitting ===\n")
+        print("\n\033[1m=== stage 3: kinematic fitting ===\033[0m\n")
         ejection_df = model_kinematics.run_kinematic_analysis(tracker_df)
         
         if ejection_df is None or ejection_df.empty:
@@ -94,18 +94,18 @@ def run(args=None):
     # Stage 4 External Data Comparison
     # Compares the calculated kinematic ejection times with external Swift X ray data
     if "swift" in skip_stages:
-        print("\n=== stage 4: swift comparison (skipped) ===\n")
+        print("\n\033[1m=== stage 4: swift comparison (skipped) ===\033[0m\n")
     else:
         if ejection_df is None:
             print("critical error: stage 3 was skipped or failed; cannot run swift comparison.")
             sys.exit(1)
-        print("\n=== stage 4: swift comparison ===\n")
+        print("\n\033[1m=== stage 4: swift comparison ===\033[0m\n")
         lib.swift_compare.plot_swift_comparison(tracker_df, ejection_df)
 
     end_time = time.time()
     total_time = (end_time - start_time) / 60
-    print(f"\npipeline finished in {total_time:.2f} minutes.")
-    print(f"\n=== process complete ===\n")
+    print(f"\n\033[1mpipeline finished in {total_time:.2f} minutes.\033[0m")
+    print(f"\n\033[1m=== process complete ===\033[0m\n")
 
 if __name__ == "__main__":
     from lib.arguments import get_pipeline_args
