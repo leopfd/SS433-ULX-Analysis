@@ -62,7 +62,10 @@ def run(args=None):
         print("\n\033[1m=== stage 1: fitting images (skipped) ===\033[0m\n")
     else:
         print("\n\033[1m=== stage 1: fitting images ===\033[0m\n")
-        fit_images.run_pipeline()
+        fit_ok = fit_images.run_pipeline()
+        if not fit_ok:
+            print("\n\033[1m[pipeline]\033[0m Stage 1 did not complete. Skipping downstream stages.\n")
+            return
     
     # Stage 2 Component Tracking
     # Aggregates individual fit results to track component movement over time
