@@ -14,6 +14,7 @@ from astropy.io import fits
 from scipy.ndimage import rotate, gaussian_filter
 import emcee
 from emcee.backends import HDFBackend
+from emcee.state import State
 import corner
 
 from astropy.time import Time
@@ -614,13 +615,32 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
         min_steps_before_check = max(AUTO_STOP_MIN_STEPS, check_interval)
         
         if not recalc and current_steps > 0:
+            try:
+                b_nwalkers, b_ndim = backend.shape
+                if b_nwalkers != current_n_walkers or b_ndim != ndim:
+                    backend = _reset_corrupt_chain(
+                        f"shape mismatch ({b_nwalkers} walkers/{b_ndim} dims != "
+                        f"{current_n_walkers} walkers/{ndim} dims)"
+                    )
+                    current_steps = 0
+            except Exception as e:
+                backend = _reset_corrupt_chain(f"shape check failed: {e}")
+                current_steps = 0
             if hasattr(backend, "get_chain"):
                 try:
-                    _ = backend.get_chain(discard=max(current_steps - 1, 0), flat=False, thin=1)
+                    tail = backend.get_chain(discard=max(current_steps - 1, 0), flat=False, thin=1)
+                    if tail.shape[-2:] != (current_n_walkers, ndim):
+                        backend = _reset_corrupt_chain(
+                            f"chain shape mismatch {tail.shape[-2:]} != "
+                            f"({current_n_walkers}, {ndim})"
+                        )
+                        current_steps = 0
                 except Exception as e:
                     backend = _reset_corrupt_chain(f"resume check failed: {e}")
                     current_steps = 0
-            if current_steps >= mcmc_iter:
+            if current_steps <= 0:
+                pass
+            elif current_steps >= mcmc_iter:
                 msg = f"\033[1m[{observation}]\033[0m Found complete chain ({current_steps} steps). Skipping fit."
                 if progress_queue:
                     progress_queue.put(("log", msg))
@@ -641,7 +661,19 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                     progress_queue.put(("log", msg))
                 else:
                     print(msg)
-                p0 = None # Resumes automatically from backend state
+                try:
+                    p0 = backend.get_last_sample()
+                    if p0.coords.shape != (current_n_walkers, ndim):
+                        backend = _reset_corrupt_chain(
+                            f"last sample shape {p0.coords.shape} != "
+                            f"({current_n_walkers}, {ndim})"
+                        )
+                        current_steps = 0
+                        p0 = None
+                except Exception as e:
+                    backend = _reset_corrupt_chain(f"could not read last sample: {e}")
+                    current_steps = 0
+                    p0 = None
         
         elif recalc and current_steps > 0:
             backend.reset(current_n_walkers, ndim)
@@ -686,7 +718,17 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                                 ticks_sent += prev_ticks
                         # Iterate step by step to allow interruption and progress reporting
                         try:
-                            for i, sample in enumerate(sampler.sample(p0, iterations=remaining_steps, progress=False)):
+                            sample_kwargs = {}
+                            if isinstance(p0, State):
+                                sample_kwargs["skip_initial_state_check"] = True
+                            for i, sample in enumerate(
+                                sampler.sample(
+                                    p0,
+                                    iterations=remaining_steps,
+                                    progress=False,
+                                    **sample_kwargs,
+                                )
+                            ):
                                 
                                 if stop_event is not None and stop_event.is_set():
                                     stop_requested = True
