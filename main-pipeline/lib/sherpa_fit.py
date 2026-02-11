@@ -565,6 +565,46 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
             buffer_size=chunk_size,
         )
 
+        def _get_autostop_marker():
+            try:
+                with backend.open() as f:
+                    if backend.name not in f:
+                        return None
+                    g = f[backend.name]
+                    if not bool(g.attrs.get("auto_stop_complete", False)):
+                        return None
+                    step = g.attrs.get("auto_stop_step", g.attrs.get("iteration", 0))
+                    try:
+                        step = int(step)
+                    except Exception:
+                        step = 0
+                    return step if step > 0 else None
+            except Exception:
+                return None
+
+        def _mark_autostop_complete(step, tau_max=None):
+            try:
+                step = int(step)
+            except Exception:
+                step = 0
+            if step <= 0:
+                return
+            try:
+                with backend.open("a") as f:
+                    if backend.name not in f:
+                        return
+                    g = f[backend.name]
+                    g.attrs["auto_stop_complete"] = True
+                    g.attrs["auto_stop_step"] = int(step)
+                    if tau_max is not None:
+                        try:
+                            g.attrs["auto_stop_tau"] = float(tau_max)
+                        except Exception:
+                            pass
+                    g.attrs["auto_stop_time"] = float(time.time())
+            except Exception:
+                pass
+
         def _reset_corrupt_chain(reason):
             msg = (f"\033[1m[{observation}]\033[0m Corrupted chain detected ({reason}). "
                    "Deleting and restarting from scratch.")
@@ -640,40 +680,58 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                     current_steps = 0
             if current_steps <= 0:
                 pass
-            elif current_steps >= mcmc_iter:
-                msg = f"\033[1m[{observation}]\033[0m Found complete chain ({current_steps} steps). Skipping fit."
-                if progress_queue:
-                    progress_queue.put(("log", msg))
-                else:
-                    print(msg)
-                run_sampler = False
-                if progress_queue:
-                    if progress_step is not None:
-                        update_interval = max(1, int(progress_step))
-                    else:
-                        update_interval = max(1, int(mcmc_iter / progress_chunks))
-                    expected_ticks = math.ceil(mcmc_iter / update_interval)
-                    if expected_ticks > 0:
-                        progress_queue.put(expected_ticks)
             else:
-                msg = f"\033[1m[{observation}]\033[0m Found partial chain ({current_steps}/{mcmc_iter} steps). Resuming..."
-                if progress_queue:
-                    progress_queue.put(("log", msg))
+                auto_stop_step = _get_autostop_marker()
+                if auto_stop_step is not None:
+                    msg = (f"\033[1m[{observation}]\033[0m Found auto-stopped chain "
+                           f"({auto_stop_step} steps). Skipping fit.")
+                    if progress_queue:
+                        progress_queue.put(("log", msg))
+                    else:
+                        print(msg)
+                    run_sampler = False
+                    if progress_queue:
+                        if progress_step is not None:
+                            update_interval = max(1, int(progress_step))
+                        else:
+                            update_interval = max(1, int(mcmc_iter / progress_chunks))
+                        expected_ticks = math.ceil(mcmc_iter / update_interval)
+                        if expected_ticks > 0:
+                            progress_queue.put(expected_ticks)
+                elif current_steps >= mcmc_iter:
+                    msg = f"\033[1m[{observation}]\033[0m Found complete chain ({current_steps} steps). Skipping fit."
+                    if progress_queue:
+                        progress_queue.put(("log", msg))
+                    else:
+                        print(msg)
+                    run_sampler = False
+                    if progress_queue:
+                        if progress_step is not None:
+                            update_interval = max(1, int(progress_step))
+                        else:
+                            update_interval = max(1, int(mcmc_iter / progress_chunks))
+                        expected_ticks = math.ceil(mcmc_iter / update_interval)
+                        if expected_ticks > 0:
+                            progress_queue.put(expected_ticks)
                 else:
-                    print(msg)
-                try:
-                    p0 = backend.get_last_sample()
-                    if p0.coords.shape != (current_n_walkers, ndim):
-                        backend = _reset_corrupt_chain(
-                            f"last sample shape {p0.coords.shape} != "
-                            f"({current_n_walkers}, {ndim})"
-                        )
+                    msg = f"\033[1m[{observation}]\033[0m Found partial chain ({current_steps}/{mcmc_iter} steps). Resuming..."
+                    if progress_queue:
+                        progress_queue.put(("log", msg))
+                    else:
+                        print(msg)
+                    try:
+                        p0 = backend.get_last_sample()
+                        if p0.coords.shape != (current_n_walkers, ndim):
+                            backend = _reset_corrupt_chain(
+                                f"last sample shape {p0.coords.shape} != "
+                                f"({current_n_walkers}, {ndim})"
+                            )
+                            current_steps = 0
+                            p0 = None
+                    except Exception as e:
+                        backend = _reset_corrupt_chain(f"could not read last sample: {e}")
                         current_steps = 0
                         p0 = None
-                except Exception as e:
-                    backend = _reset_corrupt_chain(f"could not read last sample: {e}")
-                    current_steps = 0
-                    p0 = None
         
         elif recalc and current_steps > 0:
             backend.reset(current_n_walkers, ndim)
@@ -689,6 +747,9 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                 p0[:, i] = np.clip(p0[:, i], param.min + 1e-6, param.max - 1e-6)
 
         stop_requested = False
+        auto_stop_reached = False
+        auto_stop_step = None
+        auto_stop_tau_max = None
         try:
             try:
                 import signal
@@ -758,6 +819,9 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                                             limit = AUTO_STOP_TAU_FACTOR * np.max(tau)
                                             
                                             if sampler.iteration > limit:
+                                                auto_stop_reached = True
+                                                auto_stop_step = sampler.iteration
+                                                auto_stop_tau_max = np.max(tau)
                                                 msg = f"\033[1m[{observation}]\033[0m Converged at step {sampler.iteration} (tau={np.max(tau):.1f}). Stopping early."
                                                 if progress_queue:
                                                     progress_queue.put(("log", msg))
@@ -797,6 +861,9 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                     backend.flush()
             except Exception:
                 pass
+
+            if auto_stop_reached:
+                _mark_autostop_complete(auto_stop_step or sampler.iteration, auto_stop_tau_max)
 
             if log_prob_error_count:
                 msg = (f"\033[1m[{observation}]\033[0m "
