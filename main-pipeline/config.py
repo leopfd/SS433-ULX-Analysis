@@ -72,33 +72,33 @@ OBSID_COORDS = {
 EPHEMERIS = {} 
 EPHEM_SIMPLE = {
     'model_type': 'simple',
-    'jd0_precession': 2400000.5 + 59898.78, 
-    'jd0_precession_err': 0.4, 
-    'precession_period': 160.14,
-    'precession_period_err': 0.17,
-    'beta': 0.2591, 
-    'beta_err': 0.0007,
-    'theta': np.radians(19.64), 
-    'theta_err': np.radians(0.10),
-    'inclination': np.radians(78.92), 
-    'inclination_err': np.radians(0.06),
-    'prec_pa': np.radians(10.0), 
-    'prec_pa_err': 0.0 
+    # Precession terms adopted in Yusuke et al. (2026), Table 1:
+    # basis from Gies et al. (2002) with updated t0,prec from this work.
+    'jd0_precession': 2400000.5 + 51467.67,
+    'precession_period': 162.15,
+    'beta': 0.2602,
+    'theta': np.radians(19.85),
+    'inclination': np.radians(78.83),
+    # Not specified in Yusuke et al. (2026) Table 1; kept as pipeline convention.
+    'prec_pa': np.radians(10.0)
 }
 
 # Full ephemeris model including nutation and orbital parameters
 EPHEM_FULL = {
     **EPHEM_SIMPLE,
     'model_type': 'full',  # override simple
-    'phi0': np.radians(-49.0), 
-    'jd0_nut': 2400000.5 + 59797.68,
-    'jd0_nut_err': 0.09,
-    'nut_period': 6.28802,
-    'nut_period_err': 0.00005,
-    'nut_ampl': np.radians(0.0063 * (180/np.pi)), 
-    'nut_ampl_err': np.radians(0.0003 * (180/np.pi)), 
-    'jd0_orb': 2460503.14,
-    'orbital_period': 13.082989,
+    # Use t0,prec as phase reference for the full model.
+    'phi0': 0.0,
+    # Nutation terms from Davydov et al. (2008), with updated t0,nut and A_nut
+    # reported in Yusuke et al. (2026), Table 1.
+    'jd0_nut': 2400000.5 + 43032.423,
+    'nut_period': 6.287599,
+    'nut_ampl': 0.00689349,
+    # Orbital terms from Cherepashchuk et al. (2023), as adopted in Yusuke et al. (2026).
+    'jd0_orb': 2400000.5 + 51737.04,
+    'orbital_period': 13.08250,
+    'orbital_period_dot_ss': 1.14e-7,
+    # Not tabulated by Yusuke et al. (2026); retained for this model formulation.
     'beta_orb_ampl': 0.004,
     'beta_orb_phase0': np.pi 
 }
