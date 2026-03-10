@@ -267,7 +267,7 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                        freeze_components=None, use_mcmc=True, mcmc_iter=5000, mcmc_burn_in_frac=0.2,
                        n_walkers=32, ball_size=1e-4, auto_stop=False, sigma_val=1,
                        prefix="g", confirm=True, imgfit=False, progress_chunks=50, progress_step=None, progress_queue=None,
-                       chain_base_dir=None, recalc=False, bin_size=None, signifiers=None, ephemeris=None, date_obs=None,
+                       chain_base_dir=None, recalc=False, allow_chain_changes=True, bin_size=None, signifiers=None, ephemeris=None, date_obs=None,
                        stop_event=None):
     """
     Main fitting driver using Sherpa
@@ -565,6 +565,35 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
             buffer_size=chunk_size,
         )
 
+        def _log_chain_message(message):
+            if progress_queue:
+                progress_queue.put(("log", message))
+            else:
+                print(message)
+
+        def _close_backend_file(target_backend):
+            try:
+                if hasattr(target_backend, "flush"):
+                    target_backend.flush()
+            except Exception:
+                pass
+            try:
+                target_backend._file.flush()
+            except Exception:
+                pass
+            try:
+                target_backend._file.close()
+            except Exception:
+                pass
+
+        def _ensure_chain_change_allowed(reason):
+            if allow_chain_changes:
+                return
+            raise RuntimeError(
+                f"\033[1m[{observation}]\033[0m Chain change blocked ({reason}). "
+                "No existing chain files were approved for modification in this run."
+            )
+
         def _get_autostop_marker():
             try:
                 with backend.open() as f:
@@ -605,34 +634,49 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
             except Exception:
                 pass
 
+        def _credit_expected_progress_if_skipped():
+            if not progress_queue:
+                return
+            if progress_step is not None:
+                update_interval = max(1, int(progress_step))
+            else:
+                update_interval = max(1, int(mcmc_iter / progress_chunks))
+            expected_ticks = math.ceil(mcmc_iter / update_interval)
+            if expected_ticks > 0:
+                progress_queue.put(expected_ticks)
+
+        def _partial_chain_is_converged(steps_done):
+            if not auto_stop:
+                return False, None
+            if steps_done < min_steps_before_check:
+                return False, None
+            try:
+                thin = max(1, int(steps_done / AUTO_STOP_THIN_TARGET))
+                try:
+                    tau = backend.get_autocorr_time(tol=0, thin=thin)
+                except TypeError:
+                    tau = backend.get_autocorr_time(thin=thin)
+                if not np.all(np.isfinite(tau)):
+                    return False, None
+                tau_max = float(np.max(tau))
+                if tau_max <= 0:
+                    return False, None
+                is_converged = steps_done > (AUTO_STOP_TAU_FACTOR * tau_max)
+                return bool(is_converged), tau_max
+            except Exception:
+                return False, None
+
         def _reset_corrupt_chain(reason):
+            _ensure_chain_change_allowed(f"corrupt chain reset: {reason}")
             msg = (f"\033[1m[{observation}]\033[0m Corrupted chain detected ({reason}). "
                    "Deleting and restarting from scratch.")
-            if progress_queue:
-                progress_queue.put(("log", msg))
-            else:
-                print(msg)
-            try:
-                if hasattr(backend, "flush"):
-                    backend.flush()
-            except Exception:
-                pass
-            try:
-                backend._file.flush()
-            except Exception:
-                pass
-            try:
-                backend._file.close()
-            except Exception:
-                pass
+            _log_chain_message(msg)
+            _close_backend_file(backend)
             try:
                 os.remove(chain_filename)
             except Exception as e:
                 warn = f"\033[1m[{observation}]\033[0m warning: could not remove chain file: {e}"
-                if progress_queue:
-                    progress_queue.put(("log", warn))
-                else:
-                    print(warn)
+                _log_chain_message(warn)
             new_backend = BufferedHDFBackend(
                 chain_filename,
                 compression="gzip",
@@ -690,14 +734,7 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                     else:
                         print(msg)
                     run_sampler = False
-                    if progress_queue:
-                        if progress_step is not None:
-                            update_interval = max(1, int(progress_step))
-                        else:
-                            update_interval = max(1, int(mcmc_iter / progress_chunks))
-                        expected_ticks = math.ceil(mcmc_iter / update_interval)
-                        if expected_ticks > 0:
-                            progress_queue.put(expected_ticks)
+                    _credit_expected_progress_if_skipped()
                 elif current_steps >= mcmc_iter:
                     msg = f"\033[1m[{observation}]\033[0m Found complete chain ({current_steps} steps). Skipping fit."
                     if progress_queue:
@@ -705,38 +742,53 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                     else:
                         print(msg)
                     run_sampler = False
-                    if progress_queue:
-                        if progress_step is not None:
-                            update_interval = max(1, int(progress_step))
-                        else:
-                            update_interval = max(1, int(mcmc_iter / progress_chunks))
-                        expected_ticks = math.ceil(mcmc_iter / update_interval)
-                        if expected_ticks > 0:
-                            progress_queue.put(expected_ticks)
+                    _credit_expected_progress_if_skipped()
                 else:
-                    msg = f"\033[1m[{observation}]\033[0m Found partial chain ({current_steps}/{mcmc_iter} steps). Resuming..."
-                    if progress_queue:
-                        progress_queue.put(("log", msg))
+                    is_converged, tau_max_existing = _partial_chain_is_converged(current_steps)
+                    if is_converged:
+                        msg = (
+                            f"\033[1m[{observation}]\033[0m Found converged partial chain "
+                            f"({current_steps}/{mcmc_iter} steps, tau={tau_max_existing:.1f}). Skipping fit."
+                        )
+                        _log_chain_message(msg)
+                        if allow_chain_changes:
+                            _mark_autostop_complete(current_steps, tau_max_existing)
+                        run_sampler = False
+                        _credit_expected_progress_if_skipped()
                     else:
-                        print(msg)
-                    try:
-                        p0 = backend.get_last_sample()
-                        if p0.coords.shape != (current_n_walkers, ndim):
-                            backend = _reset_corrupt_chain(
-                                f"last sample shape {p0.coords.shape} != "
-                                f"({current_n_walkers}, {ndim})"
-                            )
+                        msg = f"\033[1m[{observation}]\033[0m Found partial chain ({current_steps}/{mcmc_iter} steps). Resuming..."
+                        if progress_queue:
+                            progress_queue.put(("log", msg))
+                        else:
+                            print(msg)
+                        try:
+                            p0 = backend.get_last_sample()
+                            if p0.coords.shape != (current_n_walkers, ndim):
+                                backend = _reset_corrupt_chain(
+                                    f"last sample shape {p0.coords.shape} != "
+                                    f"({current_n_walkers}, {ndim})"
+                                )
+                                current_steps = 0
+                                p0 = None
+                        except Exception as e:
+                            backend = _reset_corrupt_chain(f"could not read last sample: {e}")
                             current_steps = 0
                             p0 = None
-                    except Exception as e:
-                        backend = _reset_corrupt_chain(f"could not read last sample: {e}")
-                        current_steps = 0
-                        p0 = None
         
         elif recalc and current_steps > 0:
+            _ensure_chain_change_allowed("--recalc reset")
+            _log_chain_message(
+                f"\033[1m[{observation}]\033[0m --recalc requested. Resetting existing chain."
+            )
             backend.reset(current_n_walkers, ndim)
         
         else:
+            if os.path.exists(chain_filename):
+                _ensure_chain_change_allowed("resetting existing zero-step chain")
+                _log_chain_message(
+                    f"\033[1m[{observation}]\033[0m Existing chain file detected with no steps. "
+                    "Resetting backend."
+                )
             backend.reset(current_n_walkers, ndim)
 
         # Generate initial walker positions ball around the best fit found by Simplex
@@ -1279,8 +1331,8 @@ def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
     return summary_output, fig, corner_fig, walker_map_fig
 
 def process_observation(infile, progress_queue, stop_event, obsid_coords, mcmc_scale_factors, emp_psf_file,
-                        n_components_multi, run_mcmc_multi, mcmc_iter_multi,
-                        mcmc_n_walkers, mcmc_ball_size, auto_stop=False,
+                        n_components_multi, n_components_by_obs, run_mcmc_multi, mcmc_iter_multi,
+                        mcmc_n_walkers, mcmc_ball_size, allow_chain_changes=False, auto_stop=False,
                         sigma_val=1, progress_step=None, progress_chunks=50, recalc=False,
                         chain_base_dir=None, signifiers=None, ephemeris=None):
     """
@@ -1307,6 +1359,19 @@ def process_observation(infile, progress_queue, stop_event, obsid_coords, mcmc_s
     if obsid not in obsid_coords:
         return (obsid, "", "", "", "", "", [], [])
     current_ra, current_dec = obsid_coords[obsid]
+
+    n_components_by_obs = n_components_by_obs or {}
+    n_components = int(n_components_by_obs.get(str(obsid), n_components_multi))
+    if n_components < 1:
+        raise ValueError(
+            f"invalid component count for obsid {obsid}: {n_components} (must be >= 1)"
+        )
+    if str(obsid) in n_components_by_obs:
+        msg = f"\033[1m[{obsid}]\033[0m Using per-observation component override: {n_components}"
+        if progress_queue:
+            progress_queue.put(("log", msg))
+        else:
+            print(msg)
     
     # Extract data and get initial quick centroid
     date, exptime, pixel_x0_best, pixel_y0_best, cnt, qp_figs = data_extract_quickpos_iter(infile)
@@ -1398,22 +1463,26 @@ def process_observation(infile, progress_queue, stop_event, obsid_coords, mcmc_s
     scaled_default_fwhm = 1.0 * pixel_scale_guess 
 
     # Initialize all components at the center and let the optimizer spread them out
-    n_components = n_components_multi 
     positions = [(new_xpos, new_ypos)] + [(img_center, img_center)] * (n_components - 1)
     amplitudes = [scaled_src_ampl] + [scaled_cnt_ampl] * (n_components - 1)
     fwhms = [scaled_src_fwhm] + [scaled_default_fwhm] * (n_components - 1)
+    if mcmc_n_walkers is None:
+        walkers_for_obs = 4 * (n_components * 3 + 2)
+    else:
+        walkers_for_obs = int(mcmc_n_walkers)
 
     multi_fit_summary, multi_fit_fig, multi_corner_fig, multi_walker_fig = gaussian_image_fit(
         obsid, n_components, positions, amplitudes, fwhms,
         prefix="g", background=0.1, pos_max=(logical_width, logical_width),
         pos_min=(0, 0), exptime=exptime, confirm=False, 
         use_mcmc=run_mcmc_multi, mcmc_iter=mcmc_iter_multi,
-        n_walkers=mcmc_n_walkers, ball_size=mcmc_ball_size,
+        n_walkers=walkers_for_obs, ball_size=mcmc_ball_size,
         auto_stop=auto_stop,
         sigma_val=sigma_val,
         progress_chunks=progress_chunks, progress_step=progress_step, progress_queue=progress_queue,
         chain_base_dir=chain_base_dir,
         recalc=recalc,
+        allow_chain_changes=allow_chain_changes,
         bin_size=multi_binsize,
         signifiers=signifiers,
         ephemeris=ephemeris,

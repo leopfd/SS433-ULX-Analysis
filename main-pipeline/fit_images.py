@@ -93,12 +93,13 @@ def run_pipeline():
     
     # Retrieve configuration variables for the fitting process
     multi_n_components = config.NUM_COMPS
+    n_components_by_obs = dict(getattr(config, "NUM_COMPS_BY_OBS", {}) or {})
     run_mcmc = config.RUN_MCMC
     recalculate_chains = config.RECALC_CHAINS
     mcmc_iterations = config.MCMC_ITER
-    
-    # Calculate number of walkers based on the number of free parameters per component
-    mcmc_n_walkers = 4 * (multi_n_components * 3 + 2)       
+
+    # Worker computes walkers from the chosen per-observation component count.
+    mcmc_n_walkers = None
     mcmc_ball_size = config.MCMC_BALL
 
     os.chdir(config.BASE_DIR)
@@ -121,6 +122,154 @@ def run_pipeline():
         if not event_files:
             print(f"warning: no files matched observation selection: {config.OBS_SELECTION}")
             return False
+
+    if n_components_by_obs:
+        available_obs = {f.split(os.sep)[0] for f in event_files}
+        ignored = sorted(
+            [obs for obs in n_components_by_obs.keys() if obs not in available_obs],
+            key=lambda s: int(s),
+        )
+        if ignored:
+            print(
+                "warning: --comps-per-obs contains observations with no matching files: "
+                + ", ".join(ignored)
+            )
+
+    def _chain_file_for_obs(obsid):
+        n_components = int(n_components_by_obs.get(obsid, multi_n_components))
+        walkers = 4 * (n_components * 3 + 2)
+        ball_str = str(mcmc_ball_size).replace('.', 'p')
+        base_name = (
+            f"mcmc-chain-{n_components}comp-"
+            f"{walkers}walkers-"
+            f"{mcmc_iterations}steps-"
+            f"{ball_str}ball"
+        )
+
+        folder_parts = [base_name]
+        signifiers = list(getattr(config, "CHAIN_SIGNIFIERS", []) or [])
+        if signifiers:
+            step_str_simple = str(mcmc_iterations)
+            step_str_k = (
+                f"{int(mcmc_iterations/1000)}k"
+                if mcmc_iterations >= 1000 and mcmc_iterations % 1000 == 0
+                else ""
+            )
+            for s in signifiers:
+                if s == "mcmc":
+                    continue
+                if s == step_str_simple:
+                    continue
+                if s == step_str_k:
+                    continue
+                folder_parts.append(s)
+
+        chain_bin_size = 0.25
+        folder_parts.append(f"bin{str(chain_bin_size).replace('.', 'p')}")
+        chain_dir = os.path.join(config.DIR_CHAINS, "-".join(folder_parts))
+        return os.path.join(chain_dir, f"{obsid}_chain.h5")
+
+    allow_chain_changes = False
+    if run_mcmc and event_files:
+        obs_ids_in_run = sorted({f.split(os.sep)[0] for f in event_files}, key=lambda s: int(s))
+        existing_chain_files = {}
+        for obs in obs_ids_in_run:
+            chain_path = _chain_file_for_obs(obs)
+            if os.path.exists(chain_path):
+                existing_chain_files[obs] = chain_path
+
+        def _expected_geometry(obsid):
+            n_components = int(n_components_by_obs.get(obsid, multi_n_components))
+            expected_ndim = n_components * 3 + 2
+            walkers_requested = (
+                4 * expected_ndim if mcmc_n_walkers is None else int(mcmc_n_walkers)
+            )
+            expected_nwalkers = (
+                walkers_requested
+                if walkers_requested >= 2 * expected_ndim
+                else 2 * expected_ndim + 2
+            )
+            return expected_nwalkers, expected_ndim
+
+        def _chain_needs_destructive_change(obsid, chain_path, backend_cls):
+            if recalculate_chains:
+                return True, "--recalc requested"
+
+            expected_nwalkers, expected_ndim = _expected_geometry(obsid)
+
+            try:
+                backend = backend_cls(chain_path, read_only=True)
+            except Exception as e:
+                return True, f"cannot open chain ({e})"
+
+            try:
+                current_steps = int(backend.iteration)
+            except Exception as e:
+                return True, f"cannot read iteration ({e})"
+
+            if current_steps <= 0:
+                return True, "existing zero-step chain file"
+
+            try:
+                b_nwalkers, b_ndim = backend.shape
+            except Exception as e:
+                return True, f"shape check failed ({e})"
+
+            if (b_nwalkers, b_ndim) != (expected_nwalkers, expected_ndim):
+                return (
+                    True,
+                    f"shape mismatch ({b_nwalkers},{b_ndim}) != ({expected_nwalkers},{expected_ndim})",
+                )
+
+            try:
+                tail = backend.get_chain(discard=max(current_steps - 1, 0), flat=False, thin=1)
+                if tail.shape[-2:] != (expected_nwalkers, expected_ndim):
+                    return (
+                        True,
+                        f"tail shape mismatch {tail.shape[-2:]} != ({expected_nwalkers},{expected_ndim})",
+                    )
+            except Exception as e:
+                return True, f"resume shape check failed ({e})"
+
+            if current_steps < mcmc_iterations:
+                try:
+                    last = backend.get_last_sample()
+                    if last.coords.shape != (expected_nwalkers, expected_ndim):
+                        return (
+                            True,
+                            f"last sample shape mismatch {last.coords.shape} != ({expected_nwalkers},{expected_ndim})",
+                        )
+                except Exception as e:
+                    return True, f"cannot read last sample ({e})"
+
+            return False, ""
+
+        destructive_candidates = []
+        if existing_chain_files:
+            try:
+                from emcee.backends import HDFBackend  # type: ignore
+            except Exception as e:
+                for obsid, chain_path in existing_chain_files.items():
+                    destructive_candidates.append((obsid, chain_path, f"cannot inspect chain ({e})"))
+            else:
+                for obsid, chain_path in existing_chain_files.items():
+                    needs_change, reason = _chain_needs_destructive_change(obsid, chain_path, HDFBackend)
+                    if needs_change:
+                        destructive_candidates.append((obsid, chain_path, reason))
+
+        if destructive_candidates:
+            print(
+                f"found {len(destructive_candidates)} chain(s) that likely require reset/recalc before use:"
+            )
+            preview = destructive_candidates[:6]
+            for obsid, _, reason in preview:
+                print(f"  {obsid}: {reason}")
+            if len(destructive_candidates) > len(preview):
+                print("  ...")
+            reply = input("allow destructive chain changes for this run? [y/n]: ").strip().lower()
+            allow_chain_changes = reply in ("y", "yes")
+            if not allow_chain_changes:
+                print("destructive chain changes were not approved; those observations will fail if reset is required.")
     
     pdf_out_filename = config.FIT_PLOT_PDF
     multi_pdf_out_filename = config.MULTI_FIT_PDF
@@ -166,16 +315,18 @@ def run_pipeline():
                           mcmc_scale_factors={}, 
                           emp_psf_file=config.EMP_PSF_FILE,
                           n_components_multi=multi_n_components,
+                          n_components_by_obs=n_components_by_obs,
                           run_mcmc_multi=run_mcmc,
                           mcmc_iter_multi=mcmc_iterations,
                           mcmc_n_walkers=mcmc_n_walkers,  
                           mcmc_ball_size=mcmc_ball_size,
+                          allow_chain_changes=allow_chain_changes,
                           auto_stop=config.AUTO_STOP,
                           sigma_val=config.SIGMA_VAL,
                           progress_step=progress_step if run_mcmc else None,
                           recalc=recalculate_chains,
                           chain_base_dir=config.DIR_CHAINS,
-                          signifiers=config.SIGNIFIERS,
+                          signifiers=config.CHAIN_SIGNIFIERS,
                           ephemeris=config.EPHEMERIS
                          )
 

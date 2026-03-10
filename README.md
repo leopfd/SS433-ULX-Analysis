@@ -16,6 +16,7 @@ End-to-end analysis for SS433 HRC observations: fit spatial models, track jet co
 ```bash
 python pipeline.py
 python pipeline.py --obs 26569-26572 --comps 4 --sigma 1 --bin 0.25 --steps 2000
+python pipeline.py --obs 26569-26572 --comps 4 --comps-per-obs 26570:3,26572:5 --steps 2000
 python pipeline.py --no-mcmc --skip-stages swift
 ```
 
@@ -27,6 +28,8 @@ Run `python pipeline.py --help` for the full CLI.
 - `--ephem simple|full` selects the ephemeris model.
 - `--skip-stages` accepts stage names or numbers: `fit`, `track`, `kinematics`, `swift`.
 - `--obs` restricts processing to specific observation IDs or ranges.
+- `--comps-per-obs` overrides component count for selected observations (`OBS:COMPS` or `START-END:COMPS`), while `--comps` remains the default for all others.
+- Chain behavior: existing complete chains are reused, partial chains are resumed unless already converged (then skipped), and `--recalc` forces a reset after confirmation when existing chain files are present.
 
 **Expected Data Layout**
 The pipeline expects spline-corrected event files under the base directory:

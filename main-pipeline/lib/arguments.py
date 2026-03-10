@@ -20,6 +20,15 @@ def get_pipeline_args():
 
     # Arguments defining the core fitting model parameters and image resolution
     parser.add_argument("--comps", type=int, default=3, help="number of components for multi-fit (default: 3)")
+    parser.add_argument(
+        "--comps-per-obs",
+        type=str,
+        help=(
+            "per-observation component overrides "
+            "(e.g. 26569:4,26570:3,26571-26572:5). "
+            "uses --comps for observations not listed"
+        ),
+    )
     parser.add_argument("--sigma", type=int, default=1, choices=[1, 2, 3], help="sigma confidence interval (1, 2, or 3) (default: 1)")
     parser.add_argument("--bin", type=float, default=0.25, help="bin size (default: 0.25)")
     
