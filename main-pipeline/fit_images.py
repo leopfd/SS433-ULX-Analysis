@@ -2,9 +2,11 @@ import os
 import glob
 import time
 import math
+import csv
 import multiprocess
 import signal
 import shutil
+from queue import Empty
 from functools import partial
 from tqdm import tqdm
 from PIL import Image
@@ -221,27 +223,6 @@ def run_pipeline():
                     f"shape mismatch ({b_nwalkers},{b_ndim}) != ({expected_nwalkers},{expected_ndim})",
                 )
 
-            try:
-                tail = backend.get_chain(discard=max(current_steps - 1, 0), flat=False, thin=1)
-                if tail.shape[-2:] != (expected_nwalkers, expected_ndim):
-                    return (
-                        True,
-                        f"tail shape mismatch {tail.shape[-2:]} != ({expected_nwalkers},{expected_ndim})",
-                    )
-            except Exception as e:
-                return True, f"resume shape check failed ({e})"
-
-            if current_steps < mcmc_iterations:
-                try:
-                    last = backend.get_last_sample()
-                    if last.coords.shape != (expected_nwalkers, expected_ndim):
-                        return (
-                            True,
-                            f"last sample shape mismatch {last.coords.shape} != ({expected_nwalkers},{expected_ndim})",
-                        )
-                except Exception as e:
-                    return True, f"cannot read last sample ({e})"
-
             return False, ""
 
         destructive_candidates = []
@@ -327,7 +308,7 @@ def run_pipeline():
                           recalc=recalculate_chains,
                           chain_base_dir=config.DIR_CHAINS,
                           signifiers=config.CHAIN_SIGNIFIERS,
-                          ephemeris=config.EPHEMERIS
+                          ephemeris=config.EPHEMERIS,
                          )
 
     if run_mcmc:
@@ -359,8 +340,11 @@ def run_pipeline():
             
             # Poll the worker pool and update the progress bar from the queue until all tasks are done
             def _drain_progress_queue():
-                while not progress_queue.empty():
-                    msg = progress_queue.get()
+                while True:
+                    try:
+                        msg = progress_queue.get_nowait()
+                    except Empty:
+                        break
                     if isinstance(msg, tuple) and len(msg) == 2 and msg[0] == "adjust_total":
                         delta = int(msg[1])
                         if delta > 0:
@@ -422,12 +406,13 @@ def run_pipeline():
     results.sort(key=lambda x: x[0])
     all_pdf_out_files = []
     all_multi_pdf_out_files = []
+    srcflux_rows = []
 
     # Write the consolidated results to text files
     with open(results_filename, 'w') as results_file, open(multi_results_filename, 'w') as multi_results_file:
         for res in results:
-            (obsid, header_text, centroid_fit_summary, src_fit_summary, 
-             multi_fit_summary, multi_results_text, 
+            (obsid, header_text, centroid_fit_summary, src_fit_summary,
+             srcflux_summary, srcflux_record, multi_fit_summary, multi_results_text,
              pdf_out_files_worker, multi_pdf_out_files_worker) = res
             
             results_file.write(header_text)
@@ -435,15 +420,43 @@ def run_pipeline():
             results_file.write(centroid_fit_summary)
             results_file.write("SOURCE FIT SUMMARY:\n\n")
             results_file.write(src_fit_summary)
+            results_file.write("SRCFLUX SUMMARY:\n\n")
+            results_file.write(srcflux_summary)
             results_file.write("MULTI-COMPONENT FIT SUMMARY:\n\n")
             results_file.write(multi_fit_summary)
+
+            if srcflux_record is not None:
+                srcflux_rows.append(srcflux_record)
             
             multi_results_file.write(multi_results_text)
             
             all_pdf_out_files.extend(pdf_out_files_worker)
             all_multi_pdf_out_files.extend(multi_pdf_out_files_worker)
 
+    if srcflux_rows:
+        fieldnames = [
+            "obs_id",
+            "status",
+            "flux_table",
+            "rate_nominal",
+            "rate_minus",
+            "rate_plus",
+            "flux_nominal",
+            "flux_minus",
+            "flux_plus",
+            "srcreg",
+            "bkgreg",
+            "psffile",
+        ]
+        with open(config.SRCFLUX_TABLE_CSV, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in srcflux_rows:
+                writer.writerow({k: row.get(k, "") for k in fieldnames})
+
     print(f"Text logs written to:\n  {config.get_rel_path(results_filename)}\n  {config.get_rel_path(multi_results_filename)}")
+    if srcflux_rows:
+        print(f"  {config.get_rel_path(config.SRCFLUX_TABLE_CSV)}")
     print('\ncompiling pdfs...\n')
 
     # Compile individual plot images into a single PDF report

@@ -30,6 +30,7 @@ Run `python pipeline.py --help` for the full CLI.
 - `--obs` restricts processing to specific observation IDs or ranges.
 - `--comps-per-obs` overrides component count for selected observations (`OBS:COMPS` or `START-END:COMPS`), while `--comps` remains the default for all others.
 - Chain behavior: existing complete chains are reused, partial chains are resumed unless already converged (then skipped), and `--recalc` forces a reset after confirmation when existing chain files are present.
+- Core flux/rate source: Stage 1 now runs `srcflux` with the empirical PSF using a guess-centered `0.9"` source aperture; Stage 2 tracker replaces core `nominal/minus_err/plus_err` with `srcflux` rates when available.
 
 **Expected Data Layout**
 The pipeline expects spline-corrected event files under the base directory:
@@ -44,6 +45,7 @@ Outputs are written under:
 - Fit PDFs: `2Dfits/fit plots/fit-plots-<ID>.pdf`
 - Multi-component PDFs: `2Dfits/multi comp fit plots/multi-comp-plots-<ID>.pdf`
 - Component tracker table: `2Dfits/comp tracker tables/comp-tracker-table-<ID>.csv`
+- Srcflux core table: `2Dfits/data tables/srcflux-core-table-<ID>.csv`
 - Tracker plots: `2Dfits/comp tracker plots/comp-tracker-plots-<ID>.pdf`
 - Kinematic plots: `2Dfits/jet plots/ss433-jet-fit-results-<ID>.pdf`
 - Swift comparison: `2Dfits/jet plots/swift-comparison-<ID>.pdf`

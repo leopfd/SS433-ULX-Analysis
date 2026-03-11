@@ -3,6 +3,8 @@ import time
 import logging
 import numpy as np
 import math
+import glob
+import warnings
 
 import matplotlib
 matplotlib.use('Agg') 
@@ -11,6 +13,7 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.lines import Line2D
 from astropy.io import fits
+from astropy.io.fits.verify import VerifyWarning
 from scipy.ndimage import rotate, gaussian_filter
 import emcee
 from emcee.backends import HDFBackend
@@ -159,26 +162,42 @@ class BufferedHDFBackend(HDFBackend):
         if self._buffer_idx >= self.buffer_size:
             self.flush()
 
-def src_psf_images(obsid, infile, x0, y0, diameter, wcs_ra, wcs_dec, binsize=0.25, shape='square', psfimg=True, showimg=False, empirical_psf=None):
+def src_psf_images(
+    obsid,
+    infile,
+    x0,
+    y0,
+    diameter,
+    wcs_ra,
+    wcs_dec,
+    binsize=0.25,
+    shape='square',
+    psfimg=True,
+    showimg=False,
+    empirical_psf=None,
+    load_into_sherpa=True,
+    output_tag=None,
+):
     """
     Extracts a region around the source and optionally prepares an empirical PSF
     It handles rotation and reprojection of the PSF to match the observation roll angle
     """
     # Define the spatial region string based on the requested shape
+    img_region_str = f"box(256.5,256.5,{diameter*4},{diameter*4},0)"
     if shape.lower() == 'circle':
         region_str = f"circle({x0},{y0},{diameter/2})"
     elif shape.lower() == 'square':
         region_str = f"box({x0},{y0},{diameter},{diameter},0)"
-        img_region_str = f"box(256.5,256.5,{diameter*4},{diameter*4},0)"
     else:
         region_str = shape.lower()
         
     # Calculate dimensions in logical pixels to name files consistently
-    logical_width = diameter/binsize
-    imagefile=f'{obsid}/src_image_{shape}_{int(logical_width)}pixel.fits'
-    psf_rotated = f'{obsid}/psf_rotated.fits'
-    psf_rotated_cut = f'{obsid}/psf_rotated_cut.fits'
-    emp_psf_imagefile = f'{obsid}/psf_image_{shape}_empirical_{int(logical_width)}pixel.fits'
+    logical_width = diameter / binsize
+    tag_suffix = f"_{output_tag}" if output_tag else ""
+    imagefile = f'{obsid}/src_image_{shape}_{int(logical_width)}pixel{tag_suffix}.fits'
+    psf_rotated = f'{obsid}/psf_rotated{tag_suffix}.fits'
+    psf_rotated_cut = f'{obsid}/psf_rotated_cut{tag_suffix}.fits'
+    emp_psf_imagefile = f'{obsid}/psf_image_{shape}_empirical_{int(logical_width)}pixel{tag_suffix}.fits'
     
     # Reset CIAO tools to default state to avoid parameter pollution
     dmcopy.punlearn()
@@ -190,7 +209,8 @@ def src_psf_images(obsid, infile, x0, y0, diameter, wcs_ra, wcs_dec, binsize=0.2
     dmcopy.infile = f'{infile}[sky={region_str}][bin x=::{binsize},y=::{binsize}]'
     dmcopy.outfile = imagefile
     dmcopy()
-    load_data(imagefile)
+    if load_into_sherpa:
+        load_data(imagefile)
 
     # Process Empirical PSF if provided
     # The PSF must be rotated to match the roll angle of the specific observation
@@ -257,10 +277,280 @@ def src_psf_images(obsid, infile, x0, y0, diameter, wcs_ra, wcs_dec, binsize=0.2
         reproject_image()
         
         # Load the prepared PSF into Sherpa
-        load_psf(f'centr_psf{obsid}', emp_psf_imagefile)
-        set_psf(f'centr_psf{obsid}')
+        if load_into_sherpa:
+            load_psf(f'centr_psf{obsid}', emp_psf_imagefile)
+            set_psf(f'centr_psf{obsid}')
 
     return binsize
+
+
+def _read_srcflux_row(flux_path):
+    with warnings.catch_warnings():
+        # srcflux .flux tables can contain long TCTYPn values that trigger VerifyWarning.
+        # These are non-fatal metadata issues; silence locally to keep pipeline logs readable.
+        warnings.filterwarnings("ignore", category=VerifyWarning)
+        with fits.open(flux_path) as hdul:
+            if len(hdul) < 2 or hdul[1].data is None or len(hdul[1].data) < 1:
+                raise ValueError(f"no data rows in {flux_path}")
+            row = hdul[1].data[0]
+            columns = set(hdul[1].columns.names)
+
+            def _get(name):
+                if name not in columns:
+                    return np.nan
+                try:
+                    return float(row[name])
+                except Exception:
+                    return np.nan
+
+            return {
+                "NET_FLUX_APER": _get("NET_FLUX_APER"),
+                "NET_FLUX_APER_LO": _get("NET_FLUX_APER_LO"),
+                "NET_FLUX_APER_HI": _get("NET_FLUX_APER_HI"),
+                "NET_RATE_APER": _get("NET_RATE_APER"),
+                "NET_RATE_APER_LO": _get("NET_RATE_APER_LO"),
+                "NET_RATE_APER_HI": _get("NET_RATE_APER_HI"),
+            }
+
+
+def _format_ciao_pos(ra, dec):
+    ra_s = str(ra).strip()
+    dec_s = str(dec).strip()
+    try:
+        ra_val = float(ra_s)
+        dec_val = float(dec_s)
+        return f"{ra_val:.8f},{dec_val:+.8f}"
+    except Exception:
+        if dec_s and dec_s[0] not in "+-":
+            dec_s = f"+{dec_s}"
+        return f"{ra_s},{dec_s}"
+
+
+def run_srcflux_guess_center(
+    obsid,
+    infile,
+    guess_x_pix,
+    guess_y_pix,
+    wcs_ra,
+    wcs_dec,
+    empirical_psf,
+    src_radius_arcsec=0.9,
+    bkg_inner_arcsec=4.0,
+    bkg_outer_arcsec=7.0,
+    band="wide",
+    progress_queue=None,
+):
+    try:
+        obs_id_val = int(obsid)
+    except Exception:
+        obs_id_val = obsid
+
+    def _result_record(
+        status,
+        flux_table="",
+        rate_nominal=np.nan,
+        rate_minus=np.nan,
+        rate_plus=np.nan,
+        flux_nominal=np.nan,
+        flux_minus=np.nan,
+        flux_plus=np.nan,
+        srcreg="",
+        bkgreg="",
+        psffile="",
+    ):
+        return {
+            "obs_id": obs_id_val,
+            "status": status,
+            "flux_table": flux_table,
+            "rate_nominal": rate_nominal,
+            "rate_minus": rate_minus,
+            "rate_plus": rate_plus,
+            "flux_nominal": flux_nominal,
+            "flux_minus": flux_minus,
+            "flux_plus": flux_plus,
+            "srcreg": srcreg,
+            "bkgreg": bkgreg,
+            "psffile": psffile,
+        }
+
+    def _log(msg):
+        full = f"\033[1m[{obsid}]\033[0m {msg}"
+        if progress_queue:
+            progress_queue.put(("log", full))
+        else:
+            print(full)
+
+    # Build a PSF image reprojected to this observation at the guess center.
+    srcflux_tag = "srcflux"
+    diameter = 40.0
+    binsize = 0.25
+    src_psf_images(
+        obsid,
+        infile,
+        guess_x_pix,
+        guess_y_pix,
+        diameter,
+        wcs_ra=wcs_ra,
+        wcs_dec=wcs_dec,
+        binsize=binsize,
+        shape="square",
+        empirical_psf=empirical_psf,
+        load_into_sherpa=False,
+        output_tag=srcflux_tag,
+    )
+
+    psf_path = f"{obsid}/psf_image_square_empirical_{int(diameter / binsize)}pixel_{srcflux_tag}.fits"
+    if not os.path.exists(psf_path):
+        return (
+            "srcflux: skipped (empirical psf preparation failed)\n",
+            _result_record(status="skipped", psffile=psf_path),
+        )
+
+    try:
+        from ciao_contrib import runtool  # type: ignore
+        srcflux_tool = getattr(runtool, "srcflux", None)
+    except Exception:
+        srcflux_tool = None
+    if srcflux_tool is None:
+        return (
+            "srcflux: skipped (ciao srcflux tool unavailable)\n",
+            _result_record(status="skipped", psffile=psf_path),
+        )
+
+    try:
+        with fits.open(infile) as hdul:
+            hdr = hdul[1].header if len(hdul) > 1 else hdul[0].header
+            pix_scale_deg = float(hdr.get("TCDLT20", hdr.get("tcdlt20")))
+        arcsec_per_pix = abs(pix_scale_deg) * 3600.0
+        if arcsec_per_pix <= 0:
+            raise ValueError("invalid pixel scale")
+    except Exception as e:
+        return (
+            f"srcflux: skipped (could not determine pixel scale: {e})\n",
+            _result_record(status="skipped", psffile=psf_path),
+        )
+
+    src_radius_pix = src_radius_arcsec / arcsec_per_pix
+    bkg_inner_pix = bkg_inner_arcsec / arcsec_per_pix
+    bkg_outer_pix = bkg_outer_arcsec / arcsec_per_pix
+
+    src_reg = f"circle({guess_x_pix:.6f},{guess_y_pix:.6f},{src_radius_pix:.6f})"
+    bkg_reg = (
+        f"annulus({guess_x_pix:.6f},{guess_y_pix:.6f},"
+        f"{bkg_inner_pix:.6f},{bkg_outer_pix:.6f})"
+    )
+    outroot = f"{obsid}/srcflux-core-guess"
+
+    srcflux_tool.punlearn()
+    srcflux_tool.clobber = "yes"
+    if hasattr(srcflux_tool, "verbose"):
+        srcflux_tool.verbose = 0
+    srcflux_tool.infile = infile
+    srcflux_tool.outroot = outroot
+    srcflux_tool.bands = band
+    srcflux_tool.srcreg = src_reg
+    srcflux_tool.bkgreg = bkg_reg
+    srcflux_tool.psfmethod = "psffile"
+    srcflux_tool.psffile = psf_path
+    if hasattr(srcflux_tool, "pos"):
+        srcflux_tool.pos = _format_ciao_pos(wcs_ra, wcs_dec)
+    if hasattr(srcflux_tool, "bkgresp"):
+        srcflux_tool.bkgresp = "no"
+
+    try:
+        srcflux_tool()
+    except Exception as e:
+        return (
+            f"srcflux: failed ({e})\n",
+            _result_record(
+                status="failed",
+                srcreg=src_reg,
+                bkgreg=bkg_reg,
+                psffile=psf_path,
+            ),
+        )
+
+    flux_files = sorted(glob.glob(f"{outroot}*.flux"))
+    if not flux_files:
+        return (
+            (
+                "srcflux: completed but no .flux table was found\n"
+                f"  srcreg: {src_reg}\n"
+                f"  psf: {psf_path}\n"
+            ),
+            _result_record(
+                status="failed",
+                srcreg=src_reg,
+                bkgreg=bkg_reg,
+                psffile=psf_path,
+            ),
+        )
+
+    flux_file = flux_files[0]
+    try:
+        row = _read_srcflux_row(flux_file)
+    except Exception as e:
+        return (
+            f"srcflux: failed to parse flux table ({e})\n",
+            _result_record(
+                status="failed",
+                flux_table=flux_file,
+                srcreg=src_reg,
+                bkgreg=bkg_reg,
+                psffile=psf_path,
+            ),
+        )
+
+    # Keep only the flux table products to avoid clutter.
+    for path in glob.glob(f"{outroot}*"):
+        if path.endswith(".flux"):
+            continue
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+    net_flux = row["NET_FLUX_APER"]
+    net_flux_lo = row["NET_FLUX_APER_LO"]
+    net_flux_hi = row["NET_FLUX_APER_HI"]
+    flux_minus = net_flux - net_flux_lo if np.isfinite(net_flux_lo) else np.nan
+    flux_plus = net_flux_hi - net_flux if np.isfinite(net_flux_hi) else np.nan
+    net_rate = row["NET_RATE_APER"]
+    net_rate_lo = row["NET_RATE_APER_LO"]
+    net_rate_hi = row["NET_RATE_APER_HI"]
+    rate_minus = net_rate - net_rate_lo if np.isfinite(net_rate_lo) else np.nan
+    rate_plus = net_rate_hi - net_rate if np.isfinite(net_rate_hi) else np.nan
+
+    _log(
+        "srcflux core aperture complete "
+        f"(r={src_radius_arcsec:.2f}\", psffile empirical)"
+    )
+    return (
+        (
+            "srcflux summary (guess-center core aperture):\n"
+            f"  srcreg: circle(guess_center, {src_radius_arcsec:.2f}\")\n"
+            f"  bkgreg: annulus({bkg_inner_arcsec:.2f}\", {bkg_outer_arcsec:.2f}\")\n"
+            f"  psfmethod: psffile\n"
+            f"  psffile: {psf_path}\n"
+            f"  flux table: {flux_file}\n"
+            f"  NET_RATE_APER = {net_rate:.6e} (-{rate_minus:.6e}/+{rate_plus:.6e})\n"
+            f"  NET_FLUX_APER = {net_flux:.6e} (-{flux_minus:.6e}/+{flux_plus:.6e})\n"
+        ),
+        _result_record(
+            status="ok",
+            flux_table=flux_file,
+            rate_nominal=net_rate,
+            rate_minus=rate_minus,
+            rate_plus=rate_plus,
+            flux_nominal=net_flux,
+            flux_minus=flux_minus,
+            flux_plus=flux_plus,
+            srcreg=src_reg,
+            bkgreg=bkg_reg,
+            psffile=psf_path,
+        ),
+    )
 
 def gaussian_image_fit(observation, n_components, position, ampl, fwhm,
                        background=0, pos_min=(0, 0), pos_max=None, exptime=None, lock_fwhm=True,
@@ -1357,7 +1647,7 @@ def process_observation(infile, progress_queue, stop_event, obsid_coords, mcmc_s
         np.random.seed(hash(obsid) % (2**32 - 1))
 
     if obsid not in obsid_coords:
-        return (obsid, "", "", "", "", "", [], [])
+        return (obsid, "", "", "", "", None, "", "", [], [])
     current_ra, current_dec = obsid_coords[obsid]
 
     n_components_by_obs = n_components_by_obs or {}
@@ -1377,6 +1667,8 @@ def process_observation(infile, progress_queue, stop_event, obsid_coords, mcmc_s
     date, exptime, pixel_x0_best, pixel_y0_best, cnt, qp_figs = data_extract_quickpos_iter(infile)
     
     header_text = f"observation: {obsid}\ninfile: {infile}\ndate: {date}, exptime: {exptime}\n"
+    srcflux_summary = ""
+    srcflux_record = None
 
     # Stage 1 Centroid Fit
     # Fit a single Gaussian to a large region to robustly find the global center
@@ -1394,7 +1686,7 @@ def process_observation(infile, progress_queue, stop_event, obsid_coords, mcmc_s
     
     if centroid_fit_summary is None:
         clean()
-        return (obsid, "", "", "", "", "", [], [])
+        return (obsid, "", "", "", "", None, "", "", [], [])
 
     temp_cent_fit_png = f"2Dfits/temp_{obsid}_cent_fit.png"
     centroid_fit_fig.savefig(temp_cent_fit_png, dpi=400)
@@ -1430,12 +1722,35 @@ def process_observation(infile, progress_queue, stop_event, obsid_coords, mcmc_s
     
     if src_fit_summary is None:
         clean()
-        return (obsid, header_text, centroid_fit_summary, "", "", "", pdf_out_files, [])
+        return (
+            obsid,
+            header_text,
+            centroid_fit_summary,
+            "",
+            "",
+            None,
+            "",
+            "",
+            pdf_out_files,
+            [],
+        )
 
     temp_src_fit_png = f"2Dfits/temp_{obsid}_src_fit.png"
     src_fit_fig.savefig(temp_src_fit_png, dpi=400)
     plt.close(src_fit_fig)
     pdf_out_files.append(temp_src_fit_png)
+
+    srcflux_summary, srcflux_record = run_srcflux_guess_center(
+        obsid=obsid,
+        infile=infile,
+        guess_x_pix=pixel_x0_best,
+        guess_y_pix=pixel_y0_best,
+        wcs_ra=current_ra,
+        wcs_dec=current_dec,
+        empirical_psf=emp_psf_file,
+        src_radius_arcsec=0.9,
+        progress_queue=progress_queue,
+    )
 
     # Stage 3 Multi Component Fit
     # Use the single component fit as a template to seed the multi component model
@@ -1492,7 +1807,18 @@ def process_observation(infile, progress_queue, stop_event, obsid_coords, mcmc_s
 
     if multi_fit_summary is None:
         clean()
-        return (obsid, header_text, centroid_fit_summary, src_fit_summary, "", "", pdf_out_files, [])
+        return (
+            obsid,
+            header_text,
+            centroid_fit_summary,
+            src_fit_summary,
+            srcflux_summary,
+            srcflux_record,
+            "",
+            "",
+            pdf_out_files,
+            [],
+        )
 
     temp_multi_fit_png = f"2Dfits/temp_{obsid}_multi_fit.png"
     multi_fit_fig.savefig(temp_multi_fit_png, dpi=400)
@@ -1515,4 +1841,15 @@ def process_observation(infile, progress_queue, stop_event, obsid_coords, mcmc_s
     multi_results_text = f"observation: {obsid}\ninfile: {infile}\ndate: {date}, exptime: {exptime}\n{multi_fit_summary}\n\n"
     clean()
 
-    return (obsid, header_text, centroid_fit_summary, src_fit_summary, multi_fit_summary, multi_results_text, pdf_out_files, multi_pdf_out_files)
+    return (
+        obsid,
+        header_text,
+        centroid_fit_summary,
+        src_fit_summary,
+        srcflux_summary,
+        srcflux_record,
+        multi_fit_summary,
+        multi_results_text,
+        pdf_out_files,
+        multi_pdf_out_files,
+    )

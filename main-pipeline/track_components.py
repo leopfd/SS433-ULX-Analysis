@@ -9,6 +9,53 @@ import config
 from lib.log_parser import load_sherpa_log_to_dataframe
 from lib.arguments import get_pipeline_args
 
+def _apply_srcflux_core_rates(df):
+    srcflux_path = getattr(config, "SRCFLUX_TABLE_CSV", "")
+    if not srcflux_path or not os.path.exists(srcflux_path):
+        return df, 0
+
+    try:
+        srcflux_df = pd.read_csv(srcflux_path)
+    except Exception as e:
+        print(f"\033[1m[WARN]\033[0m Could not read srcflux table ({srcflux_path}): {e}")
+        return df, 0
+
+    needed = {"obs_id", "status", "rate_nominal", "rate_minus", "rate_plus"}
+    if not needed.issubset(set(srcflux_df.columns)):
+        print(f"\033[1m[WARN]\033[0m srcflux table missing expected columns: {srcflux_path}")
+        return df, 0
+
+    core_rows = srcflux_df[srcflux_df["status"] == "ok"].copy()
+    if core_rows.empty:
+        return df, 0
+
+    core_rows["obs_id"] = pd.to_numeric(core_rows["obs_id"], errors="coerce")
+    core_rows["rate_nominal"] = pd.to_numeric(core_rows["rate_nominal"], errors="coerce")
+    core_rows["rate_minus"] = pd.to_numeric(core_rows["rate_minus"], errors="coerce")
+    core_rows["rate_plus"] = pd.to_numeric(core_rows["rate_plus"], errors="coerce")
+    core_rows = core_rows.dropna(subset=["obs_id", "rate_nominal", "rate_minus", "rate_plus"])
+    if core_rows.empty:
+        return df, 0
+
+    core_rows["obs_id"] = core_rows["obs_id"].astype(int)
+    core_rows = core_rows.drop_duplicates(subset=["obs_id"], keep="last")
+
+    rate_map = dict(zip(core_rows["obs_id"], core_rows["rate_nominal"]))
+    minus_map = dict(zip(core_rows["obs_id"], core_rows["rate_minus"]))
+    plus_map = dict(zip(core_rows["obs_id"], core_rows["rate_plus"]))
+
+    mask_core = df["component"] == config.G1_COMPONENT
+    mask_match = mask_core & df["obs_id"].isin(rate_map.keys())
+    if not mask_match.any():
+        return df, 0
+
+    df.loc[mask_match, "nominal"] = df.loc[mask_match, "obs_id"].map(rate_map).astype(float)
+    df.loc[mask_match, "minus_err"] = df.loc[mask_match, "obs_id"].map(minus_map).astype(float)
+    df.loc[mask_match, "plus_err"] = df.loc[mask_match, "obs_id"].map(plus_map).astype(float)
+    df.loc[mask_match, "core_flux_source"] = "srcflux"
+    df.loc[mask_core & ~mask_match, "core_flux_source"] = "model"
+    return df, int(mask_match.sum())
+
 def run_tracker_analysis():
     df = None
     
@@ -32,6 +79,12 @@ def run_tracker_analysis():
 
         df.to_csv(config.TRACKER_TABLE_CSV, index=False)
         print(f"Tracker table saved to: {config.TRACKER_TABLE_CSV}")
+
+    df, n_replaced = _apply_srcflux_core_rates(df)
+    if n_replaced > 0:
+        print(f"Applied srcflux core-rate override for {n_replaced} observation(s).")
+        df.to_csv(config.TRACKER_TABLE_CSV, index=False)
+        print(f"Updated tracker table saved to: {config.TRACKER_TABLE_CSV}")
 
     # Isolate the core component to serve as the reference point for relative positioning
     ref_df = df[df['component'] == config.G1_COMPONENT][['obs_id', 'xpos', 'ypos']]

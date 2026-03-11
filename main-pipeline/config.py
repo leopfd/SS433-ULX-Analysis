@@ -40,6 +40,7 @@ MULTI_LOG_TXT = ""
 FIT_PLOT_PDF = ""       
 MULTI_FIT_PDF = ""      
 TRACKER_TABLE_CSV = ""
+SRCFLUX_TABLE_CSV = ""
 PLOT_OUTPUT_PDF = ""
 
 # Swift and External Data configuration
@@ -204,7 +205,7 @@ def update_config_from_args(args=None):
     global FILE_ID, FITS_DIR, CENTER_PIXEL
     global DIR_LOGS_FULL, DIR_LOGS_MULTI, DIR_PLOTS_FULL, DIR_PLOTS_MULTI, DIR_CHAINS, DIR_TRACKER, DIR_DATA, DIR_TRACKER_PLOTS, DIR_JET_PLOTS
     global FULL_LOG_TXT, MULTI_LOG_TXT, FIT_PLOT_PDF, MULTI_FIT_PDF
-    global TRACKER_TABLE_CSV, PLOT_OUTPUT_PDF
+    global TRACKER_TABLE_CSV, SRCFLUX_TABLE_CSV, PLOT_OUTPUT_PDF
     global EMP_PSF_FILE, EPHEMERIS
     global SWIFT_FILE, HRC_SCALE_FACTOR
     global OBS_SELECTION, NUM_COMPS_BY_OBS
@@ -302,6 +303,7 @@ def update_config_from_args(args=None):
     MULTI_FIT_PDF = os.path.join(DIR_PLOTS_MULTI, f'multi-comp-plots-{FILE_ID}.pdf')
     
     TRACKER_TABLE_CSV = os.path.join(DIR_TRACKER, f'comp-tracker-table-{FILE_ID}.csv')
+    SRCFLUX_TABLE_CSV = os.path.join(DIR_DATA, f'srcflux-core-table-{FILE_ID}.csv')
         
     PLOT_OUTPUT_PDF = os.path.join(DIR_JET_PLOTS, f'ss433-jet-fit-results-{FILE_ID}.pdf')
 
